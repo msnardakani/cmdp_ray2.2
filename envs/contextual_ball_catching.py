@@ -4,9 +4,10 @@ import mujoco_py
 import copy
 import numpy as np
 from gymnasium import utils, spaces
-from gymnasium.envs.mujoco import  MuJocoPyEnv
+from gymnasium.envs.mujoco import MuJocoPyEnv
 from scipy.spatial.transform import Rotation
 from ray.rllib.env.apis.task_settable_env import TaskSettableEnv, TaskType
+import tree
 
 DEFAULT_CAMERA_CONFIG = {
     'azimuth': -158.83902439024388,
@@ -30,6 +31,7 @@ class ContextualBallCatching(MuJocoPyEnv, utils.EzPickle, TaskSettableEnv):
                  xml_file='model.xml',
                  reset_noise_scale=0.05,
                  context=np.array([0.68, 0.9, 0.85]),
+                 render_mode='rgb_array',
                  **kwargs):
         utils.EzPickle.__init__(self,
                                 xml_file,
@@ -43,6 +45,7 @@ class ContextualBallCatching(MuJocoPyEnv, utils.EzPickle, TaskSettableEnv):
 
         self._reset_noise_scale = reset_noise_scale
         self.context = context
+        # self.render_mode = render_mode
 
         xml_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), "data", "barrett")
         xml_path = os.path.join(xml_dir, xml_file)
@@ -53,9 +56,9 @@ class ContextualBallCatching(MuJocoPyEnv, utils.EzPickle, TaskSettableEnv):
         self._target_pos = None
 
         observation_space = spaces.Box(low=-10, high=10, shape=(21,), dtype=np.float64)
-        self.context_space = spaces.Box(low=np.array([0.125 * np.pi, 0.6, 0.75], dtype=np.float64), high=np.array([0.5 * np.pi, 1.1, 4.], dtype=np.float64), dtype=np.float64)
+        self.context_space = spaces.Box(low=np.array([0.125 * np.pi, 0.6, 0.], dtype=np.float64), high=np.array([0.5 * np.pi, 1.1, 4.], dtype=np.float64), dtype=np.float64)
         MuJocoPyEnv.__init__(
-            self, xml_path, frame_skip=5, observation_space=observation_space, **kwargs
+            self, xml_path, frame_skip=5, observation_space=observation_space, render_mode = render_mode, **kwargs
         )
         # MujocoEnv.__init__(self, xml_path, frame_skip= 5, observation_space=self.observation_space,**kwargs)
 
@@ -77,7 +80,7 @@ class ContextualBallCatching(MuJocoPyEnv, utils.EzPickle, TaskSettableEnv):
 
     def control_cost(self, action):
         # Maximum resulting control penalty is 0.5
-        control_cost = 5e-3 * np.sum(np.square(action))
+        control_cost = 5e-1 * np.sum(np.square(action*.1))
         return control_cost
 
     def _update_target_distribution_visualization(self, mu_target, sigma_target):
@@ -115,8 +118,11 @@ class ContextualBallCatching(MuJocoPyEnv, utils.EzPickle, TaskSettableEnv):
         # The action is the displacement and we assume to have a desired velocity of 0 in all joints
         for _ in range(self.frame_skip):
             self._joint_position_control(action)
-            self.sim.step()
-
+            try:
+                self.sim.step()
+            except Exception as e:
+                return self._get_obs(), 0.275 - self.control_cost(action) , False, True, {"success": False}
+                # return self._get_obs(), - self.control_cost(action) , False, True, {"success": False}
             # Check whether we caught the ball
             net_touched, ground_touched = self.get_collisions()
             if net_touched or ground_touched:
@@ -127,12 +133,19 @@ class ContextualBallCatching(MuJocoPyEnv, utils.EzPickle, TaskSettableEnv):
         if net_touched:
             net_normal = np.reshape(self.sim.data.body_xmat[self.net_body_id, :], (3, 3))[2, :]
             norm_ball_vel = self.sim.data.qvel[7:10] / np.linalg.norm(self.sim.data.qvel[7:10])
-            catch_reward = 50. + 25 * (np.dot(net_normal, norm_ball_vel) ** 5)
+            catch_reward = 100. + 25 * (np.dot(net_normal, norm_ball_vel) ** 5)
+            # catch_reward = 50. + 25 * (np.dot(net_normal, norm_ball_vel) ** 5)
+        # else:
+        #     catch_reward = 0.
+        elif ground_touched:
+            catch_reward=-100.
         else:
-            catch_reward = 0.
+            catch_reward=0.
 
         observation = self._get_obs()
-        return observation, 0.275 - control_cost + catch_reward, net_touched or ground_touched, False,{"success": net_touched}
+        # if 0.275 - control_cost + catch_reward<-100:
+        #     print(action, control_cost, catch_reward)
+        return observation,  .275- control_cost + catch_reward, net_touched or ground_touched, False,{"success": net_touched}
 
     def _joint_position_control(self, actions):
         self.des_pos[1] += self.model.opt.timestep * actions[0]

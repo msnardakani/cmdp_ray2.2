@@ -1,5 +1,6 @@
 import logging
 from typing import Union, Dict, Tuple
+import time
 
 import numpy as np
 # import gym
@@ -11,14 +12,15 @@ from ray.rllib.evaluation.episode_v2 import EpisodeV2
 from ray.rllib.evaluation.postprocessing import discount_cumsum
 
 from deep_sprl.teachers.spl.self_paced_teacher_v2 import SelfPacedTeacherV2
-from gaussian_sprl.gaussian_selfpaced_teacher import GaussianSelfPacedTeacher
+from gaussian_sprl.gaussian_selfpaced_teacher import GaussianSelfPacedTeacherV3, GaussianSelfPacedTeacherV2, \
+    GaussianSelfPacedTeacherV4
 import random
 logger = logging.getLogger(__name__)
 
-UPDATE_INTERVAL = 5
-MIN_BUFFER_SIZE = 64
-
-
+UPDATE_INTERVAL = 10
+MIN_BUFFER_SIZE = 250
+UPDATE_OFFSET=25
+BUFFER_OFFSET=20
 class Buffer:
 
     def __init__(self, n_elements, max_buffer_size, reset_on_query):
@@ -61,32 +63,72 @@ class Buffer:
     def __len__(self):
         return len(self.buffers[0])
 
+class DiscRew(DefaultCallbacks):
+    
+    def on_episode_end(
+        self,
+        *,
+        worker: "RolloutWorker",
+        base_env: BaseEnv,
+        policies ,
+        episode: Union[Episode, EpisodeV2, Exception],
+        **kwargs,
+    ) -> None:
+        # agent_cl = dict()
+        # if base_env.get_sub_environments()[0].TRAINING ==False:
+        #     # print('eval:', base_env.get_sub_environments()[episode.env_id].get_context())
+        #
+        #     return
+        rewards = episode._agent_reward_history
+        contexts = base_env.get_sub_environments()[episode.env_id
+                    ].get_context()
 
+        gamma = worker.config['gamma']
+        # print('train:', base_env.get_sub_environments()[episode.env_id].get_context())
+
+        for task in rewards.keys():
+            ctx = contexts[task]
+            disc_rew = discount_cumsum(rewards[task], gamma)[0]
+            rew = sum(rewards[task])
+
+            base_env.get_sub_environments()[episode.env_id].update_buffer( ((task, ctx, rew, disc_rew),))
+            # self.sp_teachers[task]['buffer'].update_buffer((ctx, rew, disc_rew))
+            episode.custom_metrics[f'task_{task}_disc_reward']=disc_rew
+            for i, data in enumerate(ctx.reshape(-1).tolist()): 
+                episode.custom_metrics[f'task_{task}_context_{i}'] = data
+        # print('episode end new_data: ', len(base_env.get_sub_environments()[episode.env_id].buffer))
+
+        return
 
 
 
 class MACL(DefaultCallbacks):
     iteration=0
     sp_teachers = dict()
+
     def on_train_result(self, *, algorithm, result: dict, **kwargs):
 
         # id = random.choice(list(self.sp_teachers.keys()))
 
         # print('task id: ', id,' buffer length: ', len(self.sp_teachers[id]['buffer']) )
         data = algorithm.workers.foreach_env(lambda env: env.read_buffer())
-
-        for buffer in data[1]:
-            for entry in buffer[0]:
-                if entry[0] in self.sp_teachers:
-                    # rew =
-                    self.sp_teachers[entry[0]]['buffer'].update_buffer((entry[1], entry[2], entry[3]))
-        # self.data.clear()
+        if self.iteration>BUFFER_OFFSET:
+            for buffer in data[1]:
+                for entry in buffer[0]:
+                    if entry[0] in self.sp_teachers:
+                        # rew =
+                        self.sp_teachers[entry[0]]['buffer'].update_buffer((entry[1], entry[2], entry[3]))
+            # self.data.clear()
         # agent = task if self.env_mapping is None else self.env_mapping[task]
         #     disc_rew = discount_cumsum(rewards[agent], self.gamma)[0]
         #     rew = episode.agent_rewards[agent]
         #     self.sp_teachers[task]['buffer'].update_buffer((contexts[agent], rew, disc_rew))
+
+        # kl_results = dict(update_time=0)
+        cl_update_itr = 0
         self.iteration += 1
-        if self.iteration % UPDATE_INTERVAL ==0:# and self.iteration > 9:
+        total_time = 0.0
+        if   self.iteration > UPDATE_OFFSET:
             # print(self.iteration)
             # you can mutate the result dict to add new fields to return
 
@@ -94,11 +136,15 @@ class MACL(DefaultCallbacks):
                 buffer = v['buffer']
                 teacher = v['teacher']
 
-                if len(buffer)<MIN_BUFFER_SIZE:
+                if len(buffer)<v['min_episodes'] or self.iteration% v['update_interval'] != 0:
 
                     continue
+                cl_update_itr =1
+
+                self.cl_updates += 1
+
                 idx = tsk_num
-                cons, rews, disc_rews = buffer.read_buffer()
+                cons, rews, disc_rews = buffer.read_buffer()#reset= False)
                 # stats = algorithm.workers.foreach_env(lambda env: env.get_env_episodes_statistics(idx))
                 # buffers = algorithm.workers.foreach_env(lambda env: env.get_env_context_buffer(idx))
 
@@ -107,6 +153,7 @@ class MACL(DefaultCallbacks):
                 contexts = np.array(cons)
                 discounted_rewards = np.array(disc_rews)
                 avg_perf = np.mean(rews)
+                t0 = time.time()
                 teacher.update_distribution(avg_performance=avg_perf, contexts=contexts, values=discounted_rewards)
 
                 ctx_config = teacher.export_dist()
@@ -115,7 +162,10 @@ class MACL(DefaultCallbacks):
                                                                                w = ctx_config['target_priors']))
 
                 # kl = teacher.target_context_kl(True)
-        kl_results = dict()
+                total_time += time.time() - t0
+        kl_results = dict(update_time= total_time, total_cl_updates= self.cl_updates, cl_update_itr = cl_update_itr)
+
+
 
         for tsk_num, v in self.sp_teachers.items():
             sp_progress = dict()
@@ -155,22 +205,30 @@ class MACL(DefaultCallbacks):
         #
         #     return
         rewards = episode._agent_reward_history
-        contexts = base_env.get_sub_environments()[episode.env_id].get_context()
+        contexts = base_env.get_sub_environments()[episode.env_id
+                    ].get_context()
 
         gamma = worker.config['gamma']
         # print('train:', base_env.get_sub_environments()[episode.env_id].get_context())
-
+         
+        
+        # Add your custom metric to the episode.custom_metrics dictionary
+        
+        
         for task in rewards.keys():
+            success_status = episode._last_infos[task].get('success', False)
+            episode.custom_metrics[f"task_{task}_success_rate"] = 1 if success_status else 0
             ctx = contexts[task]
             disc_rew = discount_cumsum(rewards[task], gamma)[0]
             rew = sum(rewards[task])
 
             base_env.get_sub_environments()[episode.env_id].update_buffer( ((task, ctx, rew, disc_rew),))
             # self.sp_teachers[task]['buffer'].update_buffer((ctx, rew, disc_rew))
-
-        # episode.custom_metrics['context_data'] = data
+            episode.custom_metrics[f'task_{task}_disc_reward']=disc_rew
+            for i, data in enumerate(ctx.reshape(-1).tolist()): 
+                episode.custom_metrics[f'task_{task}_context_{i}'] = data
         # print('episode end new_data: ', len(base_env.get_sub_environments()[episode.env_id].buffer))
-
+        
         return
 
     def on_algorithm_init(
@@ -189,6 +247,7 @@ class MACL(DefaultCallbacks):
             kwargs: Forward compatibility placeholder.
         """
         self.iteration = 0
+        self.cl_updates = 0
         # workers = algorithm.evaluation_workers.remote_workers()
         # for i, w in enumerate(workers):
         #     w.foreach_env.remote(lambda env: env.copy_task(env.get_task()[i]))
@@ -210,31 +269,57 @@ class MACL(DefaultCallbacks):
         #             self.sp_teachers[self.env_mapping[i]] = Buffer(n_elements=3, max_buffer_size=1000, reset_on_query=True)
         # else:
         for idx, v in enumerate(curriculum):
-            if 'self_paced' in v.get('curriculum', 'default') :
+            agent_curriculum = v.get('curriculum', 'default')
+            if 'self_paced' in  agent_curriculum:
+
                 init_mean = v['init_mean'].copy()
 
                 target_mean = v['target_mean'].copy()
-                kl_threshold = v.get('kl_threshold', 10000)
+                kl_threshold = v.get('kl_threshold', None)
                 max_kl = v.get('max_kl', 0.05)
-                perf_lb = v.get('perf_lb', 3)
-                std_lower_bound = v.get('std_lb', 0.1)
-                if 'gaussian' in v.get('curriculum', 'default'):
-                    # print('gaussian_teacher_initialization')
-                    target_var = np.diag(np.clip(v['target_var'], a_min=std_lower_bound**2, a_max=None)).copy()
-                    init_var = v['init_var'].copy()
-                    if len(init_var) == 1:
-                        init_scale= init_var
-                    elif len(init_var) ==len(v['target_var']):
-                        init_scale= np.mean(np.array(np.diag(target_var)).reshape(-1)/np.array(init_var).reshape(-1))
-                    # std_lower_bound = np.mean(np.array(v['target_var']).reshape(-1)/np.array(init_var).reshape(-1))
-                    teacher = GaussianSelfPacedTeacher(target_mean=target_mean, target_variance=target_var,
-                                                       initial_mean=init_mean, init_covar_scale=init_scale,
-                                                       context_bounds=(ctx_lb, ctx_ub), perf_lb=perf_lb,
-                                                       max_kl=max_kl, std_lower_bound=init_scale,
-                                                       kl_threshold=kl_threshold)
+                perf_lb = v.get('perf_lb', 0)
+                min_episodes = v.get('min_episodes', MIN_BUFFER_SIZE)
 
+                reset = v.get('reset', True)
+                update_interval = v.get('update_interval', UPDATE_INTERVAL)
+
+                if 'gaussian' in agent_curriculum:
+                    # print('gaussian_teacher_initialization')
+                    target_var = np.array(v['target_var']).copy()
+                    init_var = np.array(v['init_var']).copy()
+
+                    # std_lower_bound = np.mean(np.array(v['target_var']).reshape(-1)/np.array(init_var).reshape(-1))
+                    std_lower_bound = v.get('std_lb', np.array([1, ]))
+                    if 'V3' in agent_curriculum:
+                        perf_lb_fn = v.get('perf_lb_fn', None)
+
+                        teacher = GaussianSelfPacedTeacherV3(target_mean=target_mean, target_variance=target_var,
+                                                       initial_mean=init_mean, initial_var=init_var,
+                                                       context_bounds=(ctx_lb, ctx_ub), perf_lb=perf_lb,
+                                                       max_kl=max_kl, std_lower_bound=std_lower_bound,
+                                                       kl_threshold=kl_threshold,
+                                                        perf_lb_fn=perf_lb_fn)
+
+                    elif 'V4' in agent_curriculum:
+                        perf_lb_fn = v.get('perf_lb_fn', None)
+                        ctx_transform = v.get('ctx_mean_transform', None)
+
+                        teacher = GaussianSelfPacedTeacherV4(target_mean=target_mean, target_variance=target_var,
+                                                             initial_mean=init_mean, initial_var=init_var,
+                                                             context_bounds=(ctx_lb, ctx_ub), perf_lb=perf_lb,
+                                                             max_kl=max_kl, std_lower_bound=std_lower_bound,
+                                                             kl_threshold=kl_threshold,
+                                                             perf_lb_fn=perf_lb_fn,
+                                                             ctx_mean_transform=ctx_transform)
+                    else:
+                        teacher = GaussianSelfPacedTeacherV2(target_mean=target_mean, target_variance=target_var,
+                                                             initial_mean=init_mean, initial_var=init_var,
+                                                             context_bounds=(ctx_lb, ctx_ub), perf_lb=perf_lb,
+                                                             max_kl=max_kl, std_lower_bound=std_lower_bound,
+                                                             kl_threshold=kl_threshold)
 
                 else:
+                    std_lower_bound = v.get('std_lb', None)
                     target_var = np.diag(v['target_var']).copy()
                     init_var = np.diag(v['init_var']).copy()
                     teacher = SelfPacedTeacherV2(target_mean=target_mean,target_variance=target_var,
@@ -242,8 +327,8 @@ class MACL(DefaultCallbacks):
                                            context_bounds=(ctx_lb, ctx_ub), perf_lb=perf_lb,
                                           max_kl=max_kl, std_lower_bound=std_lower_bound,
                                           kl_threshold=kl_threshold, use_avg_performance=True)
-                self.sp_teachers.update({idx: dict(buffer=Buffer(n_elements=3, max_buffer_size=1000, reset_on_query=True),
-                                          teacher = teacher)})
+                self.sp_teachers.update({idx: dict(buffer=Buffer(n_elements=3, max_buffer_size=10000, reset_on_query=reset),
+                                          teacher = teacher, min_episodes = min_episodes, update_interval = update_interval)})
                 ctx_config = teacher.export_dist()
                 # idx = i
                 algorithm.workers.foreach_env(lambda env: env.set_sampler_dist(idx, means = ctx_config['target_mean'],

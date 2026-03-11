@@ -11,7 +11,7 @@ import itertools
 
 from distral.distral_ppo import DistralPPO
 from distral.distral_ppo_torch_model import DistralCentralTorchModel, DistralTorchModel
-from envs.contextual_env import  CtxDictWrapper, ctx_visibility, exp_group, GMMCtxEnvWrapper
+from envs.contextual_env import  CtxDictWrapper, ctx_visibility, exp_group, GMMCtxEnvWrapper, SquashedGMMCtxEnvWrapper
 from utils.evaluation_fn import DnCCrossEvalSeries, CL_report
 from envs.contextual_ball_catching import ContextualBallCatching
 
@@ -33,7 +33,7 @@ torch, nn = try_import_torch()
 # torch.set_default_tensor_type(torch.DoubleTensor)
 # ctx_norm= None
 
-ctx_lb = np.array([0.125 * np.pi, 0.6, 0.75])
+ctx_lb = np.array([0.125 * np.pi, 0.6, 0.1])
 ctx_ub = np.array([0.5 * np.pi, 1.1, 4.])
 
 ctx_dim = 3
@@ -45,24 +45,25 @@ max_steps = 200
 
 if __name__ == "__main__":
     env_name = "BallCatching"
-    model = [64, 64, 64 ]
+    model = [64, 64, 64, ]
     model_name = '3x64'
-    version = 'V10.4.0tmp'
+    version = 'V13.5.4'
     # num_agents = 3
     dir_path = os.path.dirname(os.path.realpath(__file__))
 
     directory = Path(os.path.join(dir_path,'results'))#"/results/" + env_name + "/"+ version+ '/'
     # just to control experiments
     #
-    ch_freq = 200
+    ch_freq = 500
+    max_iter = 2500
 
+    seeds = range(0,7)
     ctx_vis_list = [0,
                     # 1,
                     # 2,
                     ]
-
-    CL_SP = True
     CL_Def = False
+    CL_SP = True
     GAUSS_CL_SP = True
 
     BaseLine = True
@@ -86,45 +87,63 @@ if __name__ == "__main__":
     # agent_mappings = [[0, ] + list(perm) for perm in itertools.permutations(range(1, num_agents))]
     # agent_mappings_dummy = [0, ] + [1, ] * (num_agents - 1)
     sets = dict(
-        # Set0=[0, 0],
-        Set1=[ 0, 2, ],  # left and right tasks from more complicated ones
+        #
+        # Set1=[ 0, 2, ],  # left and right tasks from more complicated ones
 
         # Set2=[ 1, 3, ],
         # Set3 = [7, 8, ],
         # Set4= [7, 5, 2, ],
         # Set5= [4, 7, 5]
-        )
+        # Set0=[0, ],
+
+        # Set10 = [1,],
+        # Set20=[2, ],
+        # Set30=[3, ],
+        Set60=[5, ],
+
+    )
     #context: (phi, r, dx)
 
     parameters = []
     env_config_pars = list()
     env_config_pars.append({'target_mean' : np.array([0.3375 * np.pi, 0.85, 2.375]),
-                            'target_var': np.array([0.2 * np.pi, 0.15, 1.]),
+                            'target_var': np.square([0.2 * np.pi, 0.15, 1.]),
                             'init_mean':np.array([0.68, 0.9, 0.85]),
-                            'init_var': np.array([1e-3, 1e-3, 0.1]),
+                            'init_var': np.square([1e-3, 1e-3, 0.1]),
                             'prior': None}) # 0  default
 
-    env_config_pars.append({'target_mean': np.array([0.3375 * np.pi, 0.85, 2.375]),
+    env_config_pars.append({'target_mean': np.array([0.3375 * np.pi, 0.85, 2.375]), 
+                            'target_var': np.array([1e-3, 1e-3, 0.1]),
+
                             'init_var': np.array([0.2 * np.pi, 0.15, 1.]),
                             'init_mean': np.array([0.68, 0.9, 0.85]),
-                            'target_var': np.array([1e-3, 1e-3, 0.1]),
                             'prior': None})  # 1   uninfromative to narrow
 
-    env_config_pars.append({'target_mean': np.array([0.25 * np.pi, 0.85, 3]),
-                            'target_var': np.array([0.2 * np.pi, 0.15, 1.]),
-                            'init_mean': np.array([0.68, 0.9, 0.85]),
+    env_config_pars.append({'target_mean' : np.array([0.3375 * np.pi, .85, 2.375]),
+                            'target_var': np.array([0.1 * np.pi, 0.15, 1]),
+                            'init_mean':np.array([0.68, 0.65, 0.8]),
                             'init_var': np.array([1e-3, 1e-3, 0.1]),
-                            'prior': None})  # 2  more distant
-    env_config_pars.append({'target_mean': np.array([0.25 * np.pi, 0.85, 3]),
-                            'target_var': np.array([0.2 * np.pi, 0.15, 1.]),
-                            'init_mean': np.array([0.68, 0.9, 0.85]),
-                            'init_var': np.array([1e-3, 1e-3, 0.1]),
-                            'prior': None})  # 3  more distant ui to narrow
-
+                            'prior': None})  # 2 close narrow to uninformative 
+    
+    env_config_pars.append({'target_mean': np.array([0.3375 * np.pi, 1, 3]),
+                            'init_var': np.array([0.1 * np.pi, 0.15, .5]),
+                            'init_mean': np.array([0.3375 * np.pi, .85, 2.375]),
+                            'target_var': np.array([1e-3, 1e-3, 0.1]),
+                            'prior': None})  # 3   ui to  distant  narrow
+    env_config_pars.append({'target_mean' : np.array([0.3375 * np.pi, 0.85, 2.5]),
+                            'target_var': np.square([0.2 * np.pi, 0.15, 1.]),
+                            'init_mean':np.array([0.68, 0.9, 0.11]),
+                            'init_var': np.square([1e-3, 1e-3, 0.001]),
+                            'prior': None}) # 4  default
+    env_config_pars.append({'target_mean' : np.array([0.3375 * np.pi, 0.85, 2.5]),
+                            'target_var': np.square([0.2 * np.pi, 0.15, 1.]),
+                            'init_mean':np.array([0.68, 0.9, 0.11]),
+                            'init_var': np.square([0.1, 0.1, 0.1]),
+                            'prior': None}) 
     for s, v, in sets.items():
         for ctx_mode in ctx_vis_list:
-            env_creator = lambda config: GMMCtxEnvWrapper(
-                TimeLimit(ContextualBallCatching(context=np.array([0.68, 0.9, 0.85])), max_episode_steps=max_steps),
+            env_creator = lambda config: SquashedGMMCtxEnvWrapper(
+                TimeLimit(ContextualBallCatching(context=np.array([0.3375 * np.pi, 0.85, 2.5])), max_episode_steps=max_steps),
                 ctx_lb=ctx_lb, ctx_ub=ctx_ub, ctx_mode=ctx_mode, **config)
 
             # SPEnv = lambda: gymEnvWrapper(spgym())
@@ -144,24 +163,30 @@ if __name__ == "__main__":
                 agent_config_default[i]['curriculum'] = 'default'
 
                 agent_config_sp[i]['curriculum'] = 'self_paced'
-                agent_config_sp[i]['kl_threshold'] = 8000
-                agent_config_sp[i]['max_kl'] = 0.05
-                agent_config_sp[i]['perf_lb'] = 42.5
-                agent_config_sp[i]['std_lb'] = np.array([.1,]*ctx_dim)
+                # agent_config_sp[i]['kl_threshold'] = 8000
+                agent_config_sp[i]['max_kl'] = 0.1
+                agent_config_sp[i]['perf_lb'] = 0.
+                agent_config_sp[i]['reset'] = True
+                
+                agent_config_gsp[i]['update_interval'] = tune.grid_search([3, ])
 
 
-                agent_config_gsp[i]['curriculum'] = 'gaussian_self_paced'
+                agent_config_gsp[i]['curriculum'] = 'gaussian_self_pacedV3'
                 agent_config_gsp[i]['kl_threshold'] = 8000
-                agent_config_gsp[i]['max_kl'] = 0.05
-                agent_config_gsp[i]['perf_lb'] = 42.5
-                agent_config_gsp[i]['std_lb'] = np.array([0.1,]*ctx_dim)
-
-
+                agent_config_gsp[i]['max_kl'] = tune.grid_search([ 0.08,])
+                agent_config_gsp[i]['perf_lb'] = tune.grid_search([ 0.,])
+                agent_config_gsp[i]['std_lb'] = tune.grid_search([ 1.,])
+                agent_config_gsp[i]['reset'] = True
+                
+                agent_config_gsp[i]['min_episodes'] = tune.grid_search([128, ])
+                agent_config_gsp[i]['update_interval'] = tune.grid_search([3, ])
 
 
             dummy_env = env_creator(config={})
             model_config = {"fcnet_hiddens": model,
                             "fcnet_activation": "relu",
+                            'vf_share_layers':True,
+                            "free_log_std": True,
                             }
             # print(dummy_env.observation_space)
             dist_class, logit_dim = ModelCatalog.get_action_dist(
@@ -193,12 +218,13 @@ if __name__ == "__main__":
                                }
             policies = gen_ppo_distral_policy( N= num_agents ,model_config=model_config,
                                                central_policy_target=central_policy_target,
-                                               central_policy=central_policy, obs_space = dummy_env.observation_space, ctx_mode=ctx_mode)
+                                               central_policy=central_policy, obs_space = dummy_env.observation_space,
+                                                 ctx_mode=ctx_mode,sample_offset = 10000)
             policy_ids = list(policies.keys())
             ppo_policies = gen_ppo_distral_policy(N=num_agents, model_config=model_config,
                                                   central_policy=central_policy,
                                                   obs_space=dummy_env.observation_space,
-                                                  ctx_mode=ctx_mode)
+                                                  ctx_mode=ctx_mode,sample_offset = 10000)
             multiagent_config = {
                 "policies": policies,
                 "policy_mapping_fn": policy_mapping_fn,
@@ -211,7 +237,9 @@ if __name__ == "__main__":
                 "policies_to_train": list(ppo_policies.keys()),
                 "count_steps_by": "agent_steps",
             }
-            policies_dummy = gen_ppo_distral_policy(N = 1,model_config=model_config, central_policy=central_policy, obs_space=dummy_env.observation_space, ctx_mode=ctx_mode)
+            policies_dummy = gen_ppo_distral_policy(N = 1,model_config=model_config, central_policy=central_policy,
+                                                     obs_space=dummy_env.observation_space, ctx_mode=ctx_mode,
+                                                     sample_offset = 10000)
             policy_ids_dummy = list(policies_dummy.keys())
             dummy_multiagent_config = {
                 'policies': policies_dummy,
@@ -220,21 +248,23 @@ if __name__ == "__main__":
                 "policies_to_train": policy_ids_dummy,
             }
             config = (PPOConfig().environment(MAEnv, auto_wrap_old_gym_envs=False, env_config= env_config)
-                      .training(train_batch_size=4096, sgd_minibatch_size=512,  grad_clip= 100#tune.grid_search([100,])
+                      .training(gamma=.999,lambda_=.95,train_batch_size=iteration_ts, sgd_minibatch_size=512,
+                          grad_clip=1.,num_sgd_iter  = 10, vf_loss_coeff=.5, entropy_coeff=0.001,clip_param = 0.2,
+                          lr=5e-4,vf_clip_param=70, kl_target=0.01,grad_clip_by='norm'
                                 )
                       .framework('torch')
                       .callbacks(MACL)
-                      .resources(num_gpus=.12)
-                      .rollouts(num_rollout_workers=1, num_envs_per_worker=64)
-                      .evaluation(evaluation_interval=10, evaluation_duration=1, custom_evaluation_function=CL_report,
-                                  # evaluation_config={'env_config': eval_env_config,
-                                  # #                   'render_env':True
-                                  #                    },
+                      .resources(num_gpus=.14)
+                      .rollouts(num_rollout_workers=1, num_envs_per_worker=50,  batch_mode='complete_episodes')
+                      .evaluation(evaluation_interval=100, evaluation_duration=100,
+                                  evaluation_config={'env_config': eval_env_config, 'explore': False
+                                  #                   'render_env':True
+                                                     },
                                   evaluation_num_workers=0)
                       .multi_agent(policies=policies, policy_mapping_fn= policy_mapping_fn, policies_to_train=list(policies.keys()),
                                    count_steps_by='agent_steps',policy_states_are_swappable=True )
                       .reporting(min_sample_timesteps_per_iteration= iteration_ts,)
-                      .debugging(seed=tune.grid_search(list(range(0,16))))
+                      .debugging(seed=tune.grid_search(list(seeds)))
                       )
 
 
@@ -252,7 +282,7 @@ if __name__ == "__main__":
                                     "distill_coeff": .2
                                     }
             stop = {
-                "training_iteration": 500,
+                "training_iteration": max_iter,
 
             }
 
@@ -262,7 +292,7 @@ if __name__ == "__main__":
                 config.update({"multiagent": ppo_multiagent_config, })
                 # config.update({"multiagent": multiagent_config, })
 
-                env_config.update({"agent_config": agent_config_gsp, })
+                env_config.update({"agent_config": agent_config_sp, })
                 config.update({"env_config": env_config, })
                 config['seed'] = 7
                 alg = PPO(config = config)

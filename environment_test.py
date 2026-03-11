@@ -48,7 +48,7 @@ obs,_ =env.reset()
 for i in range(1000):
     action = env.action_space.sample()
     obs, reward, terminated, truncated, info = env.step(action)
-    print(i, terminated, truncated)
+    print(i, reward,terminated, truncated)
     env.render()
     if terminated or truncated:
         break

@@ -88,7 +88,7 @@ class GridworldEnv():
 
 
         return np.asarray([2. * (self.grid_map_shape[1] * coordinates[0] + coordinates[1]) / (
-                    self.grid_map_shape[0] * self.grid_map_shape[1]) - 1., \
+                    self.grid_map_shape[0] * self.grid_map_shape[1] -1) - 1., \
                            (action - 4.5) / 9., ])#reward])
 
     def step(self, action):

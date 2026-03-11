@@ -2,21 +2,27 @@ import itertools
 import pickle
 import time
 from collections import deque
-
+import traceback
 from ray.rllib.policy.policy import Policy
 import os
 import torch
 from scipy.stats import ttest_ind
 from tqdm import tqdm
 from envs.gridworld_contextual import TaskSettableGridworld
-from gymnasium.wrappers import TimeLimit, RecordVideo, RecordEpisodeStatistics
+from gymnasium.wrappers import TimeLimit, RecordVideo
+from utils.vect_wrapper import RecordEpisodeStatistics
 from envs.contextual_env import CtxDictWrapper, ctx_visibility, exp_group
 import numpy as np
+import pandas as pd
 from ray.rllib.policy.policy import Policy
 from distral.distral_ppo_torch_model import DistralCentralTorchModel, DistralTorchModel
 from ray.rllib.models import ModelCatalog
 import json
 import gymnasium as gym
+from matplotlib import pyplot as plt
+import pandas as pd
+from flatten_dict import flatten
+from ray.rllib.utils.spaces import space_utils
 
 gym.logger.set_level(gym.logger.DISABLED)
 GreenCell = '\\cellcolor{green!25}'
@@ -35,6 +41,29 @@ ModelCatalog.register_custom_model(
 )
 
 
+
+def read_results(file_name, keys_=['info', 'custom_metrics','time_total_s', 'sampler_results', 'policy_reward_mean',]):
+    try:
+        training_data = []
+        evaluation_data=[]
+        with open(file_name, 'r') as f:
+            for line in f:
+                try:
+                    obj = json.loads(line.strip())  # Parse each line
+                    filtered_obj= {k:obj.get(k, np.nan) for k in keys_}
+                    training_data.append(flatten(filtered_obj, reducer='slash'))
+                    
+                    if  'evaluation' in obj:
+                        eval_obj={k:obj['evaluation'].get(k, np.nan) for k in keys_}
+                        evaluation_data.append(flatten(eval_obj, reducer='slash'))
+                except json.JSONDecodeError as e:
+                    print(f"Error decoding JSON on line: {line.strip()} - {e}")
+        # for obj in data:
+        #     print(obj)
+    except FileNotFoundError:
+        print("Error: 'data_lines.json' not found.")
+    return pd.DataFrame.from_records(training_data), pd.DataFrame.from_records(evaluation_data)
+
 def record_rollouts(checkpoint_dir, env, trajectories= 2, distill= False, TupleObs = False):
     env.episode_id = 0
     if TupleObs:
@@ -50,10 +79,15 @@ def record_rollouts(checkpoint_dir, env, trajectories= 2, distill= False, TupleO
         done = False
         while not done:
             # print(obs)
-            action = learner.compute_single_action(input_dict=dict(obs=preprocessor(obs[0])))[0]
-            if distill:
-                action = learner.dist_class(learner.model.distill_out()).sample().detach().to('cpu').numpy()
-            obs = env.step(action)
+            try:
+                action = learner.compute_single_action(input_dict=dict(obs=preprocessor(obs[0])), explore=False)[0]
+                if distill:
+                    action = learner.dist_class(learner.model.distill_out()).sample().detach().to('cpu').numpy()
+                action=space_utils.unsquash_action(action, env.action_space)
+                obs = env.step(action)
+            except Exception as e:
+                print(e)
+                break
 
             done = obs[2] or obs[3]
         # if func is not None:
@@ -74,22 +108,34 @@ def evaluate_policy_vec(learner, env, duration= 128, distill= False, func = None
         func = [func,]
     if func is None:
         func = []
+
+    obs = env.reset()
+
     while len(env.return_queue)<duration:
-        obs = env.reset()
-        done = False
-        while (not done) and len(env.return_queue)<duration:
+        # done = False
+        # while (not done) and len(env.return_queue)<duration:
             # print(obs)
-            action = learner.compute_actions(obs_batch=preprocessor(obs[0]))[0]
+
+
+        try:
+            # obs[0][0,:]
+            action = learner.compute_actions(obs_batch=preprocessor(obs[0]), explore=False)[0]
             if distill:
                 action = learner.dist_class(learner.model.distill_out()).sample().detach().to('cpu').numpy()
-            obs = env.step(action)
-            terminals = np.logical_or(obs[2], obs[3])
-            done = np.all(terminals)
-            if np.any(terminals):
-                metrics = np.array([f(obs) for f in func])
-                custom_metric.extend(list(metrics.T[terminals]))
+            action=space_utils.unsquash_action(action, env.action_space)
 
-    return np.mean(np.array(env.return_queue).reshape(-1)), np.mean(np.array(env.length_queue).reshape(-1)), np.mean(custom_metric, axis= 0).reshape(-1)
+            obs = env.step(action)
+        except Exception as e:
+            print(e)
+            # print(traceback.format_exc())
+            break
+            # terminals = np.logical_or(obs[2], obs[3])
+            # done = np.all(terminals)
+            # if np.any(terminals):
+            #     metrics = np.array([f(obs) for f in func])
+            #     custom_metric.extend(list(metrics.T[terminals]))
+
+    return np.mean(np.array(env.return_queue).reshape(-1)), np.mean(np.array(env.length_queue).reshape(-1)), np.mean(np.array(env.disc_return_queue).reshape(-1))
 
 
 def evaluate_policy(checkpoint_dir, env, duration= 128, distill= False, func = None, TupleObs = False):
@@ -128,6 +174,8 @@ class evaluation():
 single_learners = [0, 2, 6]
 distill_learners = [ 0, 2, 6, 8, 10, 14, 9, 11, 15]
 naive_learners= [1, 3, 7]
+sp_learners = [2, 6, 3, 7, 10, 11, 14, 15]
+gsp_learners = [6,7,14, 15]
 sorted_idx = {0: 'B1',
               2: 'B1S',
               6:'B1G',
@@ -144,7 +192,7 @@ sorted_idx = {0: 'B1',
               14: 'D0G',
               15: 'D1G'
               }
-
+curriculum = lambda idx : 'Def' if idx not in sp_learners else ('GSP' if idx in gsp_learners else 'SP')
 name_codes = {(True, 0): 'PPO Central',  # ( baseline, default, Central)
               (True, 1): 'PPO',  # (baseline, default, MA)
               (True, 3): 'PPO',  # ( baseline, self_paced, MA)
@@ -187,15 +235,17 @@ class trial():
 
 class ExperimentEvaluation():
 
-    def __init__(self, experiment_dir ):
+    def __init__(self, experiment_dir, baselines= None ):
         self.log_dir = experiment_dir
         self.experiment_breakdown = dict()
         self.results = dict()
         self.extrnal_evaluation = dict()
+        self.plot_label= 'id'
+        self.plot_exps = 'All'
 
     # def extr_analyse(self, setup, config_lst, env_creator, func = None, duration= 100,n_env= 10,  ):
 
-    def analyse(self, env_creator, func = None, duration= 100,n_env= 10, config_trans = lambda c: c, setup_list = None):
+    def analyse(self, env_creator, func = None, duration= 100,n_env= 10, config_trans = lambda c: c, setup_list = None, record = True):
         self.results, self.experiment_breakdown = self.get_experiments()
         # t0 = time.time()
         # ctr = 1
@@ -208,21 +258,21 @@ class ExperimentEvaluation():
                 # pbar.set_description("Evaluating %s" % setup)
                 # start = time.time()
                 # print(f'Started evaluating {setup} ({ctr}/{len(self.experiment_breakdown)})')
-                self.get_results(setup=setup, env_creator=env_creator, n_env= n_env, func=func, duration = duration, config_trans=config_trans)
+                self.get_results(setup=setup, env_creator=env_creator, n_env= n_env, func=func, duration = duration, config_trans=config_trans, record = record)
                 # end = time.time()
                 # ctr+=1
                 # print(f'Finished evaluating {setup}\nSegment completion time: {time.strftime("%H:%M:%S", time.gmtime(end- start))},\tTotal elapsed time: {time.strftime("%H:%M:%S", time.gmtime(end- t0))}')
-                self.save_to_file('temp_result.pkl')
+                # self.save_to_file('temp_result.pkl')
             # setup_list = list(self.experiment_breakdown.keys())
             # pbar = tqdm(setup_list, position=0)
             for setup in setup_list:
                 # pbar.set_description("Processing %s" % setup)
                 self.best_perf_by_group(setup=setup, ctx_vis=True)
                 self.best_perf_by_group(setup=setup, ctx_vis=False)
-                # end = time.time()
-                # print(
-                #     f'Finished processing {setup} evaluation\nSegment completion time: {time.strftime("%H:%M:%S", time.gmtime(end- start))},\tTotal elapsed time: {time.strftime("%H:%M:%S", time.gmtime(end- t0))}')
-            self.save_to_file('temp_result.pkl')
+            #     # end = time.time()
+            #     # print(
+            #     #     f'Finished processing {setup} evaluation\nSegment completion time: {time.strftime("%H:%M:%S", time.gmtime(end- start))},\tTotal elapsed time: {time.strftime("%H:%M:%S", time.gmtime(end- t0))}')
+            # self.save_to_file('temp_result.pkl')
 
         return
 
@@ -240,6 +290,21 @@ class ExperimentEvaluation():
             experiment_set['experiments'] =[]
             groups = [ experiment_set['experiments'].extend(experiment_set[(vis , idx)]['experiments'])  for (vis , idx) in itertools.product([True, False], list(range(7))) if (vis , idx) in experiment_set]
             experiment_set['experiments'] = list(set((experiment_set['experiments'])))
+
+        return
+
+    def reset_experiment_group(self, group , setup):
+        if setup not in self.experiment_breakdown:
+            print('no such experiment set!')
+            return
+        if group not in self.experiment_breakdown[setup]:
+            print('no such experiment group!')
+            return
+
+        experiments = self.experiment_breakdown[setup][group]['experiments']
+        for exp in experiments:
+            self.results.pop(exp)
+        self.experiment_breakdown[setup].pop(group)
 
         return
 
@@ -400,7 +465,7 @@ class ExperimentEvaluation():
                         # task = 'task_'+str(i)
                         reward = np.zeros(0)
                         length = np.zeros(0)
-                        custom_result = np.zeros((0, duration))
+                        disc_reward =  np.zeros(0)
 
 
                         # if int(checkpoint.replace('checkpoint_', ''))< 2:
@@ -426,10 +491,9 @@ class ExperimentEvaluation():
 
                         reward = np.append(reward, task_results[0])
                         length = np.append(length, task_results[1])
-                        custom_result = np.append(custom_result, task_results[2]).reshape(-1, task_results[2].size)
-
+                        disc_reward = np.append(disc_reward, task_results[2])
                         seed_result.update({(task, policy): evaluation(returns=reward, lengths=length,
-                                                                       custom_metric=custom_result if func is not None else None)})
+                                                                       custom_metric=disc_reward)})
                 if len(policies) ==1:
                     policy = DistilledPolicy
                     for task, config in zip(tasks, env_config_lst):
@@ -441,7 +505,7 @@ class ExperimentEvaluation():
                         # task = 'task_' + str(i)
                         reward = np.zeros(0)
                         length = np.zeros(0)
-                        custom_result = np.zeros((0, duration))
+                        disc_reward =  np.zeros(0)
 
                         # if int(checkpoint.replace('checkpoint_', ''))< 2:
                         #     continue
@@ -467,12 +531,9 @@ class ExperimentEvaluation():
 
                         reward = np.append(reward, task_results[0])
                         length = np.append(length, task_results[1])
-                        custom_result = np.append(custom_result, task_results[2]).reshape(-1,
-                                                                                          task_results[2].size)
-
+                        disc_reward = np.append(disc_reward, task_results[2])
                         seed_result.update({(task, policy): evaluation(returns=reward, lengths=length,
-                                                                       custom_metric=custom_result if func is not None else np.zeros_like(
-                                                                           reward))})
+                                                                       custom_metric=disc_reward)})
 
 
                 extr_result[exp_id][seed] = seed_result
@@ -488,9 +549,9 @@ class ExperimentEvaluation():
                     lengths = np.array(
                         [extr_result[exp_id][seed][(task, policy)].lengths for seed in
                          result['seeds']]).reshape(-1)
-                    custom_metric = np.array(
+                    disc_rewards = np.array(
                         [extr_result[exp_id][seed][(task, policy)].custom_metric for seed in
-                         result['seeds']]).T
+                         result['seeds']]).reshape(-1)
 
                     temp[(task, policy)] = evaluation(returns=rewards, lengths=lengths, custom_metric=custom_metric)
                 else:
@@ -501,11 +562,11 @@ class ExperimentEvaluation():
                     [extr_result[exp_id][seed][(task, policy)].returns for seed in result['seeds']]).reshape(-1)
                 lengths = np.array(
                     [extr_result[exp_id][seed][(task, policy)].lengths for seed in result['seeds']]).reshape(-1)
-                custom_metric = np.array(
+                disc_rewards = np.array(
                     [extr_result[exp_id][seed][(task, policy)].custom_metric for seed in
-                     result['seeds']]).T
+                     result['seeds']]).reshape(-1)
 
-                temp[(task, policy)] = evaluation(returns=rewards, lengths=lengths, custom_metric=custom_metric)
+                temp[(task, policy)] = evaluation(returns=rewards, lengths=lengths, custom_metric=disc_rewards)
 
             extr_result[exp_id]['summary'] = temp
         with open(os.path.join(self.log_dir ,'report', setup,'extr_eval.pkl'), 'wb') as file:
@@ -678,10 +739,77 @@ class ExperimentEvaluation():
             pickle.dump(extr_result, file)
         return extr_result
 
-    def get_results(self, setup, env_creator, func= None, duration = 100, n_env = 10, config_trans= lambda c: c, override = False):
+    # def read_trainig_results(self, setup, special_kyes=None, record = True):
+    #     experiments = self.experiment_breakdown[setup]['experiments']
+    #     tasks = self.experiment_breakdown[setup]['tasks']
+    #
+    #     pbar = tqdm(experiments)
+    #     for exp_id in pbar:
+    #         result = self.results[exp_id]
+    #
+    #         rewards = []
+    #         losses = []
+    #         # cl_update_time = []
+    #         # cl_updates = []
+    #         pbar.set_description(
+    #             f'{setup}>> Exp {result["ID"]}, {"Visible Ctx" if result["group_id"][0] else "Hidden Ctx"}')
+    #         # if exp_id[0] != setup:
+    #         #     continue
+    #         trials_lst = result['trial_dir']
+    #         policies = result['policies']
+    #         kl_div = {('kl_div', t): [] for t in tasks}
+    #         mean_diff = {('mean_diff', t): [] for t in tasks}
+    #         var_diff = {('var_diff', t): [] for t in tasks}
+    #         task_reward = {('reward', t): [] for t in tasks}
+    #         task_theta = {('theta_hat', t): [] for t in tasks}
+    #
+    #         total_time = []
+    #         # runs = len(trials_lst)
+    #         for trial_dir in trials_lst:
+    #             try:
+    #                 training_data = pd.read_csv(os.path.join(trial_dir, 'progress.csv'))
+    #             except:
+    #                 print('missing experiment')
+    #                 break
+    #             # for pol in policies:
+    #             rewards.append(sum([np.array(training_data[f'sampler_results/policy_reward_mean/{pol}'])
+    #                                 for pol in policies]) / len(policies))
+    #             losses.append(sum([np.array(training_data[f'info/learner/{pol}/learner_stats/total_loss'])
+    #                                for pol in policies]) / len(policies))
+    #             avg_training_time = np.mean(np.array(training_data['info/curriculum/update_time'])[np.array(training_data['info/curriculum/cl_update_itr'])])
+    #             total_time.append(avg_training_time)
+    #             if result["group_id"][1] in sp_learners:
+    #                 for t in tasks:
+    #                     kl_div[('kl_div', t)].append(np.array(training_data[f'info/curriculum/{t}/kl_div']))
+    #                     mean_diff[('mean_diff', t)].append(np.array(training_data[f'info/curriculum/{t}/mean_diff']))
+    #
+    #                     var_diff[('var_diff', t)].append(np.array(training_data[f'info/curriculum/{t}/var_diff']))
+    #                     var_diff[('theta_hat', t)].append(np.array(training_data[f'info/curriculum/{t}/theta_hat']))
+    #             if result["group_id"][1] in single_learners:
+    #                 for t in tasks:
+    #                     pol = policies[0]
+    #                     task_reward[('reward', t)].append(
+    #                         np.array(training_data[f'sampler_results/policy_reward_mean/{pol}']))
+    #             else:
+    #                 for t, pol in zip(tasks, policies):
+    #                     task_reward[('reward', t)].append(
+    #                         np.array(training_data[f'sampler_results/policy_reward_mean/{pol}']))
+    #
+    #         result['training_summary'] = dict(reward=np.array(rewards), time_s=np.array(training_time),
+    #                                           loss=np.array(losses))
+    #         result['training_summary'].update(kl_div)
+    #         result['training_summary'].update(mean_diff)
+    #         result['training_summary'].update(var_diff)
+    #         result['training_summary'].update(task_theta)
+    #
+    #         result['training_summary'].update(task_reward)
+
+    def get_results(self, setup, env_creator, func= None, duration = 100, n_env = 10, config_trans= lambda c: c, override = False, record = True):
         env_config = self.experiment_breakdown[setup]['env_config']
         # t0 = time.time()
         # ctr = 0
+        # if env_config[0]['curriculum']!='default':
+        #     return
         experiments = self.experiment_breakdown[setup]['experiments']
         pbar = tqdm(experiments)
         for exp_id in pbar:
@@ -710,6 +838,8 @@ class ExperimentEvaluation():
 
 
             for trial_dir, seed in zip(result['trial_dir'], result['seeds']):
+                pbar.set_description( f'{setup}>> Exp {result["ID"]}, {"Visible Ctx" if result["group_id"][0] else "Hidden Ctx"  }>> seed {seed}')
+
                 if result.get(seed, False) is not False and not override:
                     # print(f'{setup}, {"Visible Ctx" if result["group_id"][0] else "Hidden Ctx"  }>>  trials skipped: id: {ID_str}, seed: {seed}', end='\t')
 
@@ -721,19 +851,21 @@ class ExperimentEvaluation():
                         # task = 'task_'+str(i)
                         reward = np.zeros(0)
                         length = np.zeros(0)
-                        custom_result = np.zeros((0,duration))
+                        custom_result = np.zeros(0)
 
                         for checkpoint in result['checkpoints']:
                             # if int(checkpoint.replace('checkpoint_', ''))< 2:
                             #     continue
                             log_dir = os.path.join(trial_dir, checkpoint, 'policies', policy)
+                            pbar.set_description( f'{setup}>> Exp {result["ID"]}, {"Visible Ctx" if result["group_id"][0] else "Hidden Ctx"  }>> seed {seed}>> {checkpoint}')
+
                             name_prefix = f'{policy},{task}'
                             env_creator_record = lambda cfg: RecordVideo(
                                 env_creator(cfg, ctx_mode),
                                 video_folder=log_dir, name_prefix=name_prefix,episode_trigger=lambda x: True, disable_logger=True)
 
                             env_creator_stat = lambda config: RecordEpisodeStatistics(
-                                gym.vector.SyncVectorEnv([lambda: env_creator(config, ctx_mode) for i in range(n_env)]), deque_size=duration)
+                                gym.vector.SyncVectorEnv([lambda: env_creator(config, ctx_mode) for i in range(n_env)]), deque_size=duration,  gamma =.99)
                             # env_creator_ctx = lambda cfg: RecordVideo(
                             #     RecordEpisodeStatistics(env_creator(cfg, ctx_mode), deque_size=duration),
                             #     video_folder=log_dir, name_prefix=name_prefix,episode_trigger=lambda x: x%N ==0, disable_logger=True)
@@ -741,16 +873,26 @@ class ExperimentEvaluation():
                             config_ = config_trans(config)
 
                             env = env_creator_record(config_)
-                            learner = record_rollouts(log_dir, env, TupleObs= ctx_mode==2)
+                            try:
+
+                                if record:
+                                        learner = record_rollouts(log_dir, env, TupleObs= ctx_mode==2)
+                                    
+
+                                else:
+                                    learner = Policy.from_checkpoint(log_dir)
+                            except Exception as e:
+                                print(f'failed to load checkpoint in: {log_dir}')
+                                continue
+
                             env = env_creator_stat(config_)
 
                             task_results = evaluate_policy_vec(learner, env, duration = duration, func = func, TupleObs= ctx_mode==2)
 
                             reward = np.append(reward, task_results[0])
                             length = np.append(length, task_results[1])
-                            custom_result = np.append(custom_result, task_results[2]).reshape(-1, task_results[2].size)
-
-                        seed_result.update({(task, policy): evaluation(returns=reward, lengths=length, custom_metric= custom_result if func is not None else None)})
+                            custom_result = np.append(custom_result, task_results[2])
+                        seed_result.update({(task, policy): evaluation(returns=reward, lengths=length, custom_metric= custom_result)})
 
                 if 'baseline' not in exp_id[2]:
                     policy = DistilledPolicy
@@ -758,7 +900,7 @@ class ExperimentEvaluation():
                         # task = 'task_' + str(i)
                         reward = np.zeros(0)
                         length = np.zeros(0)
-                        custom_result = np.zeros((0, duration))
+                        custom_result = np.zeros(0)
 
                         for checkpoint in result['checkpoints']:
                             # if int(checkpoint.replace('checkpoint_', ''))< 2:
@@ -789,11 +931,10 @@ class ExperimentEvaluation():
 
                             reward = np.append(reward, task_results[0])
                             length = np.append(length, task_results[1])
-                            custom_result = np.append(custom_result, task_results[2]).reshape(-1,
-                                                                                              task_results[2].size)
+                            custom_result = np.append(custom_result, task_results[2])
 
                         seed_result.update({(task, policy): evaluation(returns=reward, lengths=length,
-                                                                            custom_metric=custom_result if func is not None else np.zeros_like(reward))})
+                                                                            custom_metric=custom_result )})
 
                 fields = ['returns', 'lengths', 'custom_metric']
                 if len(tasks) == len(policies):
@@ -894,7 +1035,7 @@ class ExperimentEvaluation():
 
         return
 
-    def best_perf_by_group(self, setup, ctx_vis = True):
+    def best_perf_by_group(self, setup, ctx_vis = True, iteration= True):
         # single_learners = [0, 2, 6]
         # distill_learners = [0, 2, 6, 8, 10, 14, 9, 11, 15]
         # naive_learners = [1, 3, 7]
@@ -905,13 +1046,13 @@ class ExperimentEvaluation():
             return None, None, None
         for group in groups:
             experiments = exp_set[group]['experiments']
-            average_rewards = [np.mean(self.results[exp_id]['summary']['within'].returns) for exp_id in experiments]
+            average_rewards = [np.mean(self.results[exp_id]['summary']['within'].custom_metric) for exp_id in experiments]
             self.experiment_breakdown[setup][group]['best_exp'] = experiments[np.argmax(average_rewards)]
 
         experiments = [self.experiment_breakdown[setup][group]['best_exp'] for group in groups]
         for p, t in itertools.product(exp_set['policies'], ['total', ]+ exp_set['tasks']):
-            vals = [np.mean(self.results[exp_id]['summary'][(t, p)].returns) if len(self.results[exp_id]['policies'])!= 1 else
-                    np.mean(self.results[exp_id]['summary'][(t, self.results[exp_id]['policies'][0])].returns)
+            vals = [np.mean(self.results[exp_id]['summary'][(t, p)].custom_metric) if len(self.results[exp_id]['policies'])!= 1 else
+                    np.mean(self.results[exp_id]['summary'][(t, self.results[exp_id]['policies'][0])].custom_metric)
                     for exp_id in experiments]
             exp_set[('best_exp', ctx_vis)][(t, p)] = experiments[np.argmax(vals)]
 
@@ -919,14 +1060,16 @@ class ExperimentEvaluation():
 
 
         for k in [ 'within', 'between', 'total']:
-            vals = [np.mean(self.results[exp_id]['summary'][k].returns) for exp_id in experiments]
+            vals = [np.mean(self.results[exp_id]['summary'][k].custom_metric) for exp_id in experiments]
             exp_set[('best_exp', ctx_vis)][k] = experiments[np.argmax(vals)]
 
         p = DistilledPolicy
         experiments  = [exp_id for exp_id in experiments if self.results[exp_id]['group_id'][1] not in naive_learners]
         for t in  ['total', ]+exp_set['tasks']:
-            vals = [np.mean(self.results[exp_id]['summary'][(t, p)].returns) if len(self.results[exp_id]['policies'])!= 1 else
-                    np.mean(self.results[exp_id]['summary'][(t, self.results[exp_id]['policies'][0])].returns)
+            if len(experiments)==0:
+                break
+            vals = [np.mean(self.results[exp_id]['summary'][(t, p)].custom_metric) if len(self.results[exp_id]['policies'])!= 1 else
+                    np.mean(self.results[exp_id]['summary'][(t, self.results[exp_id]['policies'][0])].custom_metric)
                     for exp_id in experiments]
             exp_set[('best_exp', ctx_vis)][(t, p)] = experiments[np.argmax(vals)]
 
@@ -947,10 +1090,10 @@ class ExperimentEvaluation():
         output = '\\begin{longtable}{'+'|c'*5 + '|}\n\caption{' + setup + ', ' + ctx_str + ' Experiment parameters}\n\label{tab:S' + setup.replace(
             'Set', '') + ('V' if ctx_vis else 'H') + 'Exps}\\\\\n'
 
-        output +='\hline\n'+'&'.join(['ID', 'Name', 'Curriculum', 'Parameters', 'Runs',]) + '\\\\\n\hline \hline\n\endfirsthead\n'
+        output +='\hline\n'+'&'.join(['ID', 'Name', 'Curriculum', 'Parameters', 'Runs','Training Time' ,]) + '\\\\\n\hline \hline\n\endfirsthead\n'
 
         output += '\multicolumn{5}{c}{\\bfseries \\tablename\ \\thetable{} -- continued from previous page}\\\\\hline\n'
-        output += '\hline\n'+'&'.join(['ID', 'Name', 'Curriculum', 'Parameters', 'Runs',]) + '\\\\\n\hline \hline\n\endhead\n'
+        output += '\hline\n'+'&'.join(['ID', 'Name', 'Curriculum', 'Parameters', 'Runs','Training Time',]) + '\\\\\n\hline \hline\n\endhead\n'
 
         output += '\hline \multicolumn{5}{|r|}{{Continued on next page}} \\\\ \hline\n\endfoot\hline\hline\n\endlastfoot\n'
 
@@ -1016,7 +1159,7 @@ class ExperimentEvaluation():
 
                     parameters = parameters.replace(',', ', ')
 
-                    row = [experiment['ID'], name_codes[experiment['group_id']] ,exp_id[3] , parameters, str(experiment['runs'])]
+                    row = [experiment['ID'], name_codes[experiment['group_id']] ,exp_id[3] , parameters, str(experiment['runs']), str(np.round(np.mean(experiment['training_summary']['time_s'])/60, 1))]
                     experiments_table.append('&'.join(row) + '\\\\\n')
 
         experiments_table.append('\\end{longtable}\n')
@@ -1034,15 +1177,15 @@ class ExperimentEvaluation():
         output = '\\begin{longtable}{|c|' +  '|c'*6 + '|}\n\caption{' + setup + ', ' + ctx_str + ' Total rewards }\n\label{tab:S' + setup.replace(
             'Set', '') + ('V' if ctx_vis else 'H') + 'RewTot}\\\\\n'
 
-        output +="\hline\n"+ '&'.join([' ', '\multicolumn{2}{|c|}{Reward Within}',
-                            '\multicolumn{2}{c|}{Reward Between}',
-                            '\multicolumn{2}{c|}{Total Reward}']) + '\\\\\n'
+        output +="\hline\n"+ '&'.join([' ', '\multicolumn{2}{|c|}{Rewards}',
+                            '\multicolumn{2}{c|}{Discounted Reward}',
+                            '\multicolumn{2}{c|}{Length}']) + '\\\\\n'
         output += '&'.join(['Algorithm', ] + ['mean', 'se' ] * 3 ) + '\\\\\hline\n\endfirsthead\n'
 
         output += '\multicolumn{7}{c}{\\bfseries \\tablename\ \\thetable{} -- continued from previous page}\\\\\hline\n'
-        output += "\hline\n" + '&'.join([' ', '\multicolumn{2}{|c|}{Reward Within}',
-                                         '\multicolumn{2}{c|}{Reward Between}',
-                                         '\multicolumn{2}{c|}{Total Reward}']) + '\\\\\n'
+        output += "\hline\n" + '&'.join([' ', '\multicolumn{2}{|c|}{Rewards}',
+                            '\multicolumn{2}{c|}{Discounted Reward}',
+                            '\multicolumn{2}{c|}{Length}']) + '\\\\\n'
         output += '&'.join(['Algorithm', ] + ['mean', 'se',]*3 ) + '\\\\\hline\n\endhead\n'
         output += '\hline \multicolumn{7}{|r|}{{Continued on next page}} \\\\ \hline\n\endfoot\hline\hline\n\endlastfoot\n'
         # result_tsk_pol.append(output)
@@ -1067,9 +1210,14 @@ class ExperimentEvaluation():
                     experiment = self.results[exp_id]
                     n = experiment['runs']
                     row = [experiment['ID'], ]
-                    for k in ['within', 'between', 'total']:
-                        returns = experiment['summary'][k].returns
-                        row += [str(round(np.mean(returns), 2)), str(round(np.std(returns)/n**.5, 3))]
+                    # for k in ['within', 'between', 'total']:
+                    returns = experiment['summary']['total'].returns
+                    row += [str(round(np.mean(returns), 2)), str(round(np.std(returns)/n**.5, 3))]
+                    disc_returns = experiment['summary']['total'].custom_metric
+                    row += [str(round(np.mean(disc_returns), 2)), str(round(np.std(disc_returns)/n**.5, 3))]
+                    lengths = experiment['summary']['total'].lengths
+                    row += [str(round(np.mean(lengths), 2)), str(round(np.std(lengths)/n**.5, 3))]
+                    
                     total_results.append('&'.join(row) + '\\\\\n')
 
 
@@ -1398,14 +1546,21 @@ class ExperimentEvaluation():
 
         result_total = list()
         # print('Context Visible')
-        result_total.append('\\begin{tabular}{|c|'+'|c'* 9 + '|}\n\hline\n')
+        # result_total.append('\\begin{tabular}{|c|'+'|c'* 9 + '|}\n\hline\n')
 
-        result_total.append( '&'.join(['Algorithm', '\multicolumn{3}{c|}{Reward Within}',
-                           '\multicolumn{3}{c|}{Reward Between}',
-                           '\multicolumn{3}{c|}{Total Rewards}']) + '\\\\\n')
+        # result_total.append( '&'.join(['Algorithm', '\multicolumn{3}{c|}{Reward Within}',
+        #                    '\multicolumn{3}{c|}{Reward Between}',
+        #                    '\multicolumn{3}{c|}{Total Rewards}']) + '\\\\\n')
+        # result_total.append('&'.join([' ', 'mean', 'se', 'p-value',
+        #                     'mean', 'se', 'p-value',
+        #                     'mean', 'se','p-value',]) + '\\\\\n\hline\n')
+
+        result_total.append('\\begin{tabular}{|c|'+'|c'* 6 + '|}\n\hline\n')
+
+        result_total.append( '&'.join(['Algorithm', '\multicolumn{3}{c|}{Reward }',
+                           '\multicolumn{3}{c|}{Discounted Reward }']) + '\\\\\n')
         result_total.append('&'.join([' ', 'mean', 'se', 'p-value',
-                            'mean', 'se', 'p-value',
-                            'mean', 'se','p-value',]) + '\\\\\n\hline\n')
+                            'mean', 'se', 'p-value',]) + '\\\\\n\hline\n')
 
         best_experiments = exp_set[('best_exp', ctx_vis)]
         experiments = [exp_set[group]['best_exp'] for group in groups]
@@ -1413,17 +1568,39 @@ class ExperimentEvaluation():
             experiment = self.results[exp_id]
             n = experiment['runs']
             row = [experiment['ID'], ]
-            for k in ['within', 'between', 'total']:
-                returns = experiment['summary'][k].returns
+            # for k in ['within', 'between', 'total']:
+            #     returns = experiment['summary'][k].returns
+            #     # if setup=='Set0' and ctx_vis:
+            #     #     print(exp_id,best_experiments[k])
+            #     if exp_id == best_experiments[k]:
+
+            #         row += [GreenCell+str(round(np.mean(returns), 2)),
+            #                 GreenCell+str(round(np.std(returns)/n**.5, 3)), ' ']
+
+            #     else:
+            #         returns_best = self.results[best_experiments[k]]['summary'][k].returns
+            #         # vals_tst = group_best[k]
+            #         pvalue = ttest_ind(returns,
+            #                   returns_best,
+            #                   equal_var=False)[1]
+            #         if pvalue> 0.05 or np.isnan(pvalue):
+            #             sig= ''
+            #         else:
+            #             sig = RedCell
+
+            #         row += [ str(round(np.mean(returns), 2)),
+            #                   str(round(np.std(returns)/ n**.5, 3)), sig+ str(round(pvalue, 3))]
+            for k in ['returns', 'custom_metric', ]:
+                returns = experiment['summary']['total'].__getattribute__(k)
                 # if setup=='Set0' and ctx_vis:
                 #     print(exp_id,best_experiments[k])
-                if exp_id == best_experiments[k]:
+                if exp_id == best_experiments['total']:
 
                     row += [GreenCell+str(round(np.mean(returns), 2)),
                             GreenCell+str(round(np.std(returns)/n**.5, 3)), ' ']
 
                 else:
-                    returns_best = self.results[best_experiments[k]]['summary'][k].returns
+                    returns_best = self.results[best_experiments['total']]['summary']['total'].__getattribute__(k)
                     # vals_tst = group_best[k]
                     pvalue = ttest_ind(returns,
                               returns_best,
@@ -1643,8 +1820,14 @@ class ExperimentEvaluation():
 
         return result_total, result_tsk_pol
 
-    def report(self):
-        for setup in self.experiment_breakdown.keys():
+    def report(self, exp_sets= None):
+
+        if exp_sets is None:
+            exp_sets= list(self.experiment_breakdown.keys())
+
+        for setup in exp_sets:
+            self.read_trainig_results(setup=setup)
+
             for ctx_vis in [True, False]:
                 folder = 'ctx_vis' if ctx_vis else 'ctx_hid'
 
@@ -1684,6 +1867,7 @@ class ExperimentEvaluation():
                     print(f'{setup} folder not found')
 
                 total, policy_task = self.statistical_comp(setup, ctx_vis=ctx_vis)
+                self.plot_training(setup, ctx_vis=ctx_vis)
                 # try:
                 #     total, policy_task = self.statistical_comp( setup, ctx_vis= ctx_vis)
                 # except Exception as e:
@@ -1956,7 +2140,275 @@ class ExperimentEvaluation():
 
         return  result_tsk_pol
 
+    def read_trainig_results(self, setup, special_kyes = None):
+        experiments = self.experiment_breakdown[setup]['experiments']
+        tasks = self.experiment_breakdown[setup]['tasks']
 
+        pbar = tqdm(experiments)
+        for exp_id in pbar:
+            result = self.results[exp_id]
+
+            rewards = []
+            losses = []
+            pbar.set_description(
+                f'{setup}>> Exp {result["ID"]}, {"Visible Ctx" if result["group_id"][0] else "Hidden Ctx"}')
+            # if exp_id[0] != setup:
+            #     continue
+            trials_lst = result['trial_dir']
+            policies = result['policies']
+            kl_div = {('kl_div',t):[] for t in tasks}
+
+            v_bar = {('v_bar', t): [] for t in tasks}
+            mean_diff = {('mean_diff', t): [] for t in tasks}
+            var_diff = {('var_diff', t): [] for t in tasks}
+            theta_hat = {('theta_hat', t): [] for t in tasks}
+
+            task_reward = {('reward', t):[] for t in tasks}
+            total_time = []
+            # runs = len(trials_lst)
+            for trial_dir in trials_lst:
+                try:
+                    training_data = read_results(os.path.join(trial_dir, 'result.json'))
+                except:
+                    print('missing experiment')
+                    break
+                # for pol in policies:
+                if 'policy_reward_mean/learner_0' not in training_data:
+
+                    print(exp_id)
+                    continue
+                rewards.append(sum([np.array(training_data[f'policy_reward_mean/{pol}'])
+                                    for pol in policies])/len(policies))
+                losses.append(sum([np.array(training_data[f'info/learner/{pol}/learner_stats/total_loss'] )
+                                  for pol in policies])/len(policies))
+                training_time = training_data['time_total_s']
+                total_time.append(training_time[training_time.size -1])
+                if result["group_id"][1] in sp_learners:
+                    for t in tasks:
+
+                        kl_div[('kl_div',t)].append(np.array(training_data[f'info/curriculum/{t}/kl_div']))
+                        mean_diff[('mean_diff',t)].append(np.array(training_data[f'info/curriculum/{t}/mean_diff']))
+                        var_diff[('var_diff',t)].append(np.array(training_data[f'info/curriculum/{t}/var_diff']))
+                        v_bar[('v_bar',t)].append(np.array(training_data[f'info/curriculum/{t}/v_bar']
+                                                            if f'info/curriculum/{t}/v_bar' in training_data
+                                                            else [0,]))
+                        theta_hat[('theta_hat', t)].append(np.array(training_data[f'info/curriculum/{t}/theta_hat']
+                                                            ))
+
+                if result["group_id"][1] in single_learners:
+                    for t in tasks:
+                        pol = policies[0]
+                        task_reward[('reward',t)].append(np.array(training_data[f'sampler_results/policy_reward_mean/{pol}']))
+                else:
+                    for t ,pol in zip(tasks, policies):
+
+                        task_reward[('reward', t)].append(
+                            np.array(training_data[f'policy_reward_mean/{pol}']))
+            # if setup=='Set0' and exp_id[3]=='default':
+            #     rewards= [rew[:400] for rew in rewards]
+            #     losses= [l[:400] for l in losses]
+
+            result['training_summary'] = dict(reward = np.array(rewards),time_s =np.array(training_time),   loss= np.array(losses))
+            result['training_summary'].update(kl_div)
+            result['training_summary'].update(mean_diff)
+            result['training_summary'].update(var_diff)
+            result['training_summary'].update(v_bar)
+            result['training_summary'].update(theta_hat)
+
+            result['training_summary'].update(task_reward)
+            seeds = result['seeds']
+
+            keys = list(result[seeds[0]].keys())
+            keys.remove('best_iter')
+            result['evaluation_summary'] = dict()
+            # best_iter = np.arg_max(np.flip(np.array([result[seed]['within'].returns for seed in seeds]), axis =1))
+            for k in keys:
+                dat =  np.array([result[seed][k].returns for seed in seeds])
+
+                result['evaluation_summary'][k]  =np.flip(dat, 1)
+        return
+
+    # def plot(self, experiment_lst, key, name, folder, x_label = 'iteration', y_label = '', title = '',color_str=None, labels = None, scale= None):
+    #     if color_str == None:
+    #         color_str = [f'C{i}' for i,_ in enumerate(experiment_lst)]
+    #     assert len(color_str) == len(experiment_lst)
+    #
+    #     if labels ==None:
+    #         labels = [ self.results[exp_id]['ID'] for exp_id in experiment_lst]
+    #     fig = plt.figure()
+    #     plt.figure(figsize=(10, 4))
+    #     for exp_id, color, label in zip(experiment_lst, color_str, labels) :
+    #         result = self.results[exp_id]
+    #         if 'training_summary' in result:
+    #             training_summary = result['training_summary']
+    #
+    #         else:
+    #             continue
+    #
+    #
+    #         if key not in training_summary:
+    #             continue
+    #
+    #
+    #         y = training_summary[key]
+    #         if isinstance(y, list):
+    #             y = np.array(y)
+    #
+    #
+    #         if len(y.shape) <2:
+    #             # print(result['ID'])
+    #             continue
+    #         plt.plot(np.mean(y, axis=0), color, label=label)
+    #         plt.fill_between(range(y.shape[1]),
+    #                          np.mean(y, axis=0) - np.std(y, axis=0) / y.shape[0] ** 0.5,
+    #                          np.mean(y, axis=0) + np.std(y, axis=0) / y.shape[0] ** 0.5,
+    #                          color=color, alpha=0.5, label=
+    #                          None)
+    #
+    #     if scale!= None:
+    #         plt.yscale(scale)
+    #     plt.legend()
+    #     plt.title(title)
+    #     plt.xlabel(x_label)
+    #     plt.ylabel(y_label)
+    #     plt.grid(True)
+    #
+    #     plt.savefig(os.path.join(folder, f'{name}.pdf'), format='pdf', dpi=300)
+    #     plt.close(fig)
+
+    def plot(self, experiment_lst, key, name, folder, x_label='iteration', y_label='', title='', color_str=None,
+         labels=None, scale=None,plot_group = 'training_summary', step = 1):
+        
+        if color_str == None:
+            color_str = [f'C{i}' for i, _ in enumerate(experiment_lst)]
+        assert len(color_str) == len(experiment_lst)
+
+        if labels == None:
+            labels = [self.results[exp_id]['ID'] for exp_id in experiment_lst]
+        fig = plt.figure()
+        plt.figure(figsize=(8, 4))
+        for exp_id, color, label in zip(experiment_lst, color_str, labels):
+            result = self.results[exp_id]
+            if plot_group in result:
+                training_summary = result[plot_group]
+
+            else:
+                continue
+
+            if key not in training_summary:
+                continue
+
+            y = training_summary[key]
+            if isinstance(y, list):
+                try:
+                    y = np.array(y)
+                except Exception:
+                    y=np.array([x[:400] for x in y])
+
+
+            if len(y.shape) < 2:
+                # print(result['ID'])
+                continue
+            
+            plt.plot(step+step*np.array(range(0, y.shape[1])), np.mean(y, axis=0), color, label=label)
+            plt.fill_between(step +step*np.array(range(0, y.shape[1])),
+                             np.mean(y, axis=0) - np.std(y, axis=0) / y.shape[0] ** 0.5,
+                             np.mean(y, axis=0) + np.std(y, axis=0) / y.shape[0] ** 0.5,
+                             color=color, alpha=0.5, label=
+                             None)
+            df = pd.DataFrame()
+            df['x']=(step+step*np.array(range(0, y.shape[1]))).tolist()
+            y_mean=np.mean(y, axis=0)
+            y_se=np.std(y, axis=0) / y.shape[0] ** 0.5
+            df['y']=(y_mean).tolist()
+            df['y_p']=(y_mean+y_se).tolist()
+            df['y_m']=(y_mean-y_se).tolist()
+            df.to_csv(os.path.join(folder, f'{name}_{self.results[exp_id]["ID"]}.csv'), index=False)
+        if scale != None:
+            plt.yscale(scale)
+        plt.legend()
+        plt.title(title)
+        plt.xlabel(x_label)
+        plt.ylabel(y_label)
+        plt.grid(True)
+
+        plt.savefig(os.path.join(folder, f'{name}.pdf'), format='pdf', dpi=300)
+        plt.close(fig)
+
+    def plot_training(self, setup, ctx_vis = True, group= None):
+        if not hasattr(self, "plot_label"):
+            self.plot_label = 'id'
+        if not hasattr(self, "plot_exps"):
+            self.plot_exps = 'all'
+        if not hasattr(self, "plot_step"):
+            self.plot_step = 1
+        vis_dir = 'ctx_vis' if ctx_vis else 'ctx_hid'
+
+        exp_set = self.experiment_breakdown[setup]
+        # best_performers, groups, best_by_group = self.best_perf_by_key(setup=setup, ctx_vis=ctx_vis)
+        groups = [(ctx_vis, i) for i in (naive_learners+ distill_learners) if (ctx_vis, i) in exp_set]
+        if len(groups) == 0:
+            raise Exception('no experiment')
+
+        experiments = self.plot_exps
+        assert (experiments.lower() in ['all', 'a',  'best', 'b',  'group', 'g', ]) , "experiments to be plotted must be in ['all', 'best', 'group']!"
+        # best_experiments = exp_set[('best_exp', ctx_vis)]
+
+        if experiments.lower().startswith('b'):
+            experiment_lst = [exp_set[group]['best_exp'] for group in groups]
+            exps_tag = 'best'
+        elif experiments.lower().startswith('g'):
+
+            assert group in groups, f"specified group: {group} does not exist in the experiment setup"
+            experiment_lst = exp_set[group]['experiments']
+            exps_tag = f'{group}'
+        else:
+            experiment_lst = []
+            for group in groups:
+                experiment_lst+=exp_set[group]['experiments']
+            exps_tag = 'all'
+        folder = os.path.join(self.log_dir,'report', setup, vis_dir)
+        if self.plot_label.lower() =='id':
+            labels = [f'{self.results[exp_id]["ID"]}' for exp_id in experiment_lst]
+
+        elif self.plot_label.lower() =='full':
+            labels = [f'{self.results[exp_id]["ID"]}, {exp_id[5]}' for exp_id in experiment_lst]
+
+        else:
+            labels = [f'{curriculum(self.results[exp_id]["group_id"][1])}' for exp_id in experiment_lst]
+            labels = ['Default' if lab =='Def' else lab for lab in labels]
+            labels = ['Self-paced' if lab == 'SP' else lab for lab in labels]
+            labels = ['Gaussian Self-paced' if lab == 'GSP' else lab for lab in labels]
+        # experiment_lst, key, name, folder, x_label = 'iteration', y_label = '', title = '', color_str = None, labels = None
+        self.plot(experiment_lst=experiment_lst, key ='reward', name = f'total_rewards_{exps_tag}',
+                  title= '', y_label='Average Collected Reward', labels= labels, folder= folder)
+
+        self.plot(experiment_lst=experiment_lst, key='loss', name=f'loss_{exps_tag}',
+                  title='', y_label='Total Loss', labels=labels,folder= folder)
+        tasks = self.experiment_breakdown[setup]['tasks']
+        for tsk in tasks:
+            self.plot(experiment_lst=experiment_lst, key=('kl_div', tsk), name=f'kl_div_{tsk}_{exps_tag}',
+                  title='', y_label='KL divergence', labels=labels, folder= folder, scale= 'log')
+            self.plot(experiment_lst=experiment_lst, key=('theta_hat', tsk), name=f'theta_{tsk}_{exps_tag}',
+                      title='', y_label='theta', labels=labels, folder=folder, scale='log')
+            self.plot(experiment_lst=experiment_lst, key=('mean_diff', tsk), name=f'mean_diff_{tsk}_{exps_tag}',
+                      title='', y_label='avg mean difference', labels=labels, folder=folder)
+
+            self.plot(experiment_lst=experiment_lst, key=('var_diff', tsk), name=f'var_diff_{tsk}_{exps_tag}',
+                      title='', y_label='avg var difference', labels=labels, folder=folder)
+
+            self.plot(experiment_lst=experiment_lst, key=('v_bar', tsk), name=f'v_bar_{tsk}_{exps_tag}',
+                      title='', y_label='CL V bar', labels=labels, folder=folder)
+
+            self.plot(experiment_lst=experiment_lst, key=('reward', tsk), name=f'reward_{tsk}_{exps_tag}',
+                      title='', y_label='Average Collected Reward', labels=labels, folder=folder)
+        # print(experiment_lst)
+
+            self.plot(experiment_lst=experiment_lst, key=(tsk, 'learner_0'), name=f'eval_reward_{tsk}_{exps_tag}',
+                      title='', y_label='Average Collected Reward', labels=labels, folder=folder, plot_group='evaluation_summary',
+                      step=self.plot_step)
+
+        # tasks = self.experiment_breakdown[setup]['tasks']
     def report_extr_eval(self, extr_results):
         # for setup in self.experiment_breakdown.keys():
         setup = extr_results['setup']
@@ -1985,5 +2437,8 @@ class ExperimentEvaluation():
                         f.write(l)
             except FileNotFoundError as e:
                 print(f'{setup} folder not found')
+
+
+
 
 

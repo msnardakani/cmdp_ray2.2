@@ -1,5 +1,6 @@
 from ray.rllib.env.apis.task_settable_env import TaskSettableEnv
 from deep_sprl.environments.contextual_point_mass_2d import ContextualPointMass2D
+from deep_sprl.environments.contextual_point_mass import ContextualPointMass
 from ray.rllib.env.env_context import EnvContext
 from ray.rllib.utils.annotations import override
 from deep_sprl.teachers.abstract_teacher import BaseWrapper
@@ -107,7 +108,21 @@ class TaskSettablePointMass2D(TaskSettableEnv):
 
 
 class PointMassEnv(ContextualPointMass2D, TaskSettableEnv):
-    def __init__(self,context=np.array([0., 2.]) ):
+    def __init__(self,context=np.array([0., 2.]) , room_rew_coeff = 0):
+
+        super().__init__(context=context, room_rew_coeff = room_rew_coeff)
+        self.render_mode='rgb_array'
+
+
+    def set_task(self, task) -> None:
+        self.set_context(task)
+
+    def get_task(self):
+        return self.get_context()
+
+
+class PointMassEnv3D(ContextualPointMass, TaskSettableEnv):
+    def __init__(self,context=np.array([0., 2., 0.]) ):
 
         super().__init__(context=context)
         self.render_mode='rgb_array'

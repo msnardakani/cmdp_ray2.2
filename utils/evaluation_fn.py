@@ -108,7 +108,6 @@ def DnCCrossEval(algorithm, eval_workers):
     Args:
         algorithm: Algorithm class to evaluate.
         eval_workers: Evaluation WorkerSet.
-
     Returns:
         metrics: Evaluation metrics dict.
     """

@@ -131,6 +131,15 @@ class GMMSampler:
 
         return dict(target_mean = self.mu , target_var = self.vars, target_priors = self.w)
 
+class SquashedGMMSampler(GMMSampler):
+    def sample(self):
+
+        i = np.where(np.cumsum(self.w0) > np.random.rand())[0][0]
+        x1=np.random.triangular(self.bounds[0], self.mu[i], self.bounds[1])
+
+        x2= np.random.default_rng().multivariate_normal(self.mu[i],self.vars[i]) 
+        x2[np.logical_or(x2>self.bounds[1],x2<self.bounds[0])] =x1[np.logical_or(x2>self.bounds[1],x2<self.bounds[0])]
+        return x2
 
 class UniformSampler:
 

@@ -6,8 +6,8 @@ from .contextual_point_mass import ContextualPointMass
 
 class ContextualPointMass2D(Env):
     metadata = {'render.modes': ['human', 'rgb_array']}
-    def __init__(self, context=np.array([0., 2.])):
-        self.env = ContextualPointMass(np.concatenate((context, [0.])))
+    def __init__(self, context=np.array([0., 2.]), room_rew_coeff = 0):
+        self.env = ContextualPointMass(np.concatenate((context, [0.])), room_rew_coeff = room_rew_coeff)
         self.action_space = self.env.action_space
         self.observation_space = self.env.observation_space
         self.context_space = Box(low = np.array([-4., .5], dtype=np.float64),
@@ -17,7 +17,7 @@ class ContextualPointMass2D(Env):
         self.env.context = np.concatenate((context, [0.]))
 
     def get_context(self):
-        return self.env.context.copy()
+        return self.env.context[0:2].copy()
 
     context = property(get_context, set_context)
 

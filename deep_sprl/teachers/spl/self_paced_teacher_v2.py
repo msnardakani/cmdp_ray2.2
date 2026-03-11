@@ -14,7 +14,7 @@ class AbstractSelfPacedTeacher:
     def __init__(self, init_mean, flat_init_chol, target_mean, flat_target_chol, max_kl):
         self.context_dist = GaussianTorchDistribution(init_mean, flat_init_chol, use_cuda=False, dtype=torch.float64)
         self.target_dist = GaussianTorchDistribution(target_mean, flat_target_chol, use_cuda=False, dtype=torch.float64)
-
+        self.v_bar =0
         self.max_kl = max_kl
         self.iteration = 0
 
@@ -22,7 +22,7 @@ class AbstractSelfPacedTeacher:
         kl_div = torch.distributions.kl.kl_divergence(self.context_dist.distribution_t,
                                                       self.target_dist.distribution_t).detach()
         if numpy:
-            kl_div = kl_div.numpy()
+            kl_div = np.mean(kl_div.numpy())
 
         return kl_div
 
@@ -53,7 +53,10 @@ class AbstractSelfPacedTeacher:
     def get_status(self):
         return {"mean_diff": np.mean(np.abs(self.context_dist.mean()-self.target_dist.mean())) ,
                 "var_diff": np.mean(np.abs(np.diag(self.context_dist.covariance_matrix() - self.target_dist.covariance_matrix()))),
-                'perf_lb': self.perf_lb_reached}
+                'perf_lb': self.perf_lb_reached,
+                'v_bar': self.v_bar,
+                'E_V': 0,
+                'theta_hat': (np.linalg.det(self.context_dist.covariance_matrix())/ np.linalg.det(self.target_dist.covariance_matrix()))**(1/self.context_dim)}
 
     def reconfig(self, config):
 
@@ -74,6 +77,7 @@ class SelfPacedTeacherV2(AbstractTeacher, AbstractSelfPacedTeacher):
 
         # The bounds that we show to the outside are limited to the interval [-1, 1], as this is typically better for
         # neural nets to deal with
+        self.v_bar = 0
         self.context_dim = target_mean.shape[0]
         self.context_bounds = context_bounds
         self.bounds = context_bounds
@@ -112,6 +116,8 @@ class SelfPacedTeacherV2(AbstractTeacher, AbstractSelfPacedTeacher):
     def update_distribution(self, avg_performance, contexts, values, ):
         # if  contexts.size < 1:
         #     return
+        self.v_bar = np.mean(values)
+
         old_context_dist = GaussianTorchDistribution.from_weights(self.context_dim, self.context_dist.get_weights(),
                                                                   dtype=torch.float64)
         contexts_t = to_float_tensor(contexts, use_cuda=False, dtype=torch.float64)
@@ -169,6 +175,7 @@ class SelfPacedTeacherV2(AbstractTeacher, AbstractSelfPacedTeacher):
                 print("Warning! KL-Bound of x0 violates constraint already")
 
             # print(perf_con_fn(x0))
+
             if perf_con_fn(x0) >= self.perf_lb:
                 # print("Optimizing KL")
                 self.perf_lb_reached = True

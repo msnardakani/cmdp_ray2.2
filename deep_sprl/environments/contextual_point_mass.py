@@ -8,11 +8,13 @@ from skimage.draw import  rectangle, ellipse, disk
 import matplotlib.pyplot as plt
 class ContextualPointMass(Env):
     metadata = {'render.modes': ['human', 'rgb_array']}
-    def __init__(self, context=np.array([0., 2., 2.])):#, horizon = 100):
+    def __init__(self, context=np.array([0., 2., 2.]), room_rew_coeff = 0):#, horizon = 100):
+        self.room_rew_coeff = room_rew_coeff
         self.action_space = spaces.Box(np.array([-10., -10.], dtype=np.float64), np.array([10., 10.], dtype=np.float64),dtype=np.float64)
         self.observation_space = spaces.Box(np.array([-4., -np.inf, -4., -np.inf], dtype=np.float64),
                                             np.array([4., np.inf, 4., np.inf], dtype=np.float64), dtype=np.float64)
-
+        self.context_space = spaces.Box(low = np.array([-4., .5, 0], dtype=np.float64),
+                                 high = np.array([4., 6., 4.], dtype=np.float64), dtype=np.float64)
         self._state = None
         self._goal_state = np.array([0., 0., -3., 0.])
         self.context = context
@@ -45,10 +47,18 @@ class ContextualPointMass(Env):
         state_der[0::2] = state[1::2]
         friction_param = self.context[2]
         state_der[1::2] = 1.5 * action - friction_param * state[1::2] + np.random.normal(0, 0.05, (2,))
-        new_state = np.clip(state + self._dt * state_der, self.observation_space.low,
-                            self.observation_space.high)
 
+        # success=False
         crash = False
+        new_state_ = state + self._dt * state_der
+        new_state= np.clip(new_state_, self.observation_space.low,
+                                    self.observation_space.high)
+
+        # distance = np.linalg.norm(self._goal_state[0::2] - new_state[0::2])
+
+        if any(new_state!= new_state_):
+            return new_state, True
+
         if state[2] >= 0 > new_state[2] or state[2] <= 0 < new_state[2]:
             alpha = (0. - state[2]) / (new_state[2] - state[2])
             x_crit = alpha * new_state[0] + (1 - alpha) * state[0]
@@ -56,7 +66,8 @@ class ContextualPointMass(Env):
             if np.abs(x_crit - self.context[0]) > 0.5 * self.context[1]:
                 new_state = np.array([x_crit, 0., 0., 0.], dtype=np.float64)
                 crash = True
-
+        # distance = np.linalg.norm(self._goal_state[0::2] - new_state[0::2])
+        # success = distance < 0.3
         return new_state, crash
 
     def step(self, action):
@@ -71,16 +82,19 @@ class ContextualPointMass(Env):
             # self.steps+=1
             new_state, crash = self._step_internal(new_state, action)
 
-            if crash :#or self.steps>self.horizon:
+            if crash:
                 # crash = True
                 break
 
         self._state = np.copy(new_state)
         distance = np.linalg.norm(self._goal_state[0::2] - new_state[0::2])
         success = distance < 0.25
-        info = {"is_success": success}
-        reward = np.exp(-0.6 * distance) + 10 if success else np.exp(-0.6 * distance)
+        room = 0 if new_state[2]>- 0.10 else 1
+        info = {"success": success, 'distance': distance, 'room': room}
+        reward =  20 if success else np.exp(-0.6 * distance)
+        # reward =  np.exp(-0.6 * distance)+1 if success else np.exp(-0.6 * distance)
 
+        reward+= room * self.room_rew_coeff
         return new_state, reward, crash or success, False,  info
 
     def render(self, mode='rgb_array'):
@@ -114,3 +128,16 @@ class ContextualPointMass(Env):
 
             # print(screen)
             return frame
+
+
+    def set_context(self, context):
+        self.context = context
+
+    def get_context(self):
+        return self.context.copy()
+
+        context = property(get_context, set_context)
+
+        # def reset(self, *, seed=None, options=None):
+        #     return self.env.reset(seed = seed, options = options)
+

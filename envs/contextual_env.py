@@ -28,7 +28,7 @@ from ray.rllib.utils.typing import (
 )
 
 from ray.rllib.utils.typing import EnvCreator, MultiAgentDict
-from deep_sprl.teachers.dummy_teachers import GMMSampler
+from deep_sprl.teachers.dummy_teachers import GMMSampler, SquashedGMMSampler
 from flatten_dict import flatten, unflatten
 
 import logging
@@ -110,21 +110,26 @@ class GMMCtxEnvWrapper(gym.ObservationWrapper, TaskSettableEnv):
 
         self.context_space = gym.spaces.Box(low=ctx_lb, high=ctx_ub, dtype=np.float64)
 
-        self._ctx_sampler = GMMSampler(target_mean.copy(),
+        self._sampler_setup(target_mean.copy(),
                                        target_var.copy(),
                                        target_priors.copy(),
                                        (self.ctx_lb.copy(),
                                         self.ctx_ub.copy()))
         self.cur_context = self._ctx_sampler.sample()
-        self.env.set_task(self.cur_context.copy())
+        self.env.unwrapped.set_task(self.cur_context.copy())
         # obs, info = self.env.reset(seed=seed, options=options)
         self.cur_context = self.env.get_task()
 
+
+    def _sampler_setup(self, means, sigma2, w, bounds):
+        self._ctx_sampler = GMMSampler( means, sigma2, w, bounds)
+        return
+
     def reset(self, *, seed= None, options = None):
         self.cur_context = self._ctx_sampler.sample()
-        self.env.set_task(self.cur_context.copy())
+        self.env.unwrapped.set_task(self.cur_context.copy())
         obs, info = self.env.reset(seed=seed, options=options)
-        self.cur_context = self.env.get_task()
+        self.cur_context = self.env.unwrapped.get_task()
         return self.observation(obs=obs), info
 
     def sample_tasks(self, n_tasks):
@@ -140,7 +145,7 @@ class GMMCtxEnvWrapper(gym.ObservationWrapper, TaskSettableEnv):
 
     def report_task(self):
         if hasattr(self.env, 'report_task'):
-            self.env.set_task(self._ctx_sampler.mean())
+            self.env.unwrapped.set_task(self._ctx_sampler.mean())
             return self.env.report_task()
 
         return {'mean': self._ctx_sampler.mean(), 'var': np.diag(self._ctx_sampler.covariance_matrix())}
@@ -158,6 +163,11 @@ class GMMCtxEnvWrapper(gym.ObservationWrapper, TaskSettableEnv):
     def get_context(self):
         return self.cur_context
 
+class SquashedGMMCtxEnvWrapper( GMMCtxEnvWrapper):
+    def sampler_setup(self, means, sigma2, w, bounds):
+        self._ctx_sampler = SquashedGMMSampler( means, sigma2, w, bounds)
+         
+        return 
 
 class CtxDictWrapper(gym.ObservationWrapper, TaskSettableEnv):
     def identity_obs(self, obs):
@@ -185,12 +195,18 @@ class CtxDictWrapper(gym.ObservationWrapper, TaskSettableEnv):
         bias = 0
 
         for k in self.selected_keys:
-            ctx_length = len(self.flat_ctx[k])
+            if isinstance(self.flat_ctx[k],(int, float)):
+                ctx_length=1
+            else:
+                ctx_length = len(self.flat_ctx[k])
             self.ctx_map[k] = (bias, bias + ctx_length)
             bias += ctx_length
 
         self.current_flat_ctx = {k:self.flat_ctx[k] for k in self.selected_keys}
-        self.cur_context = np.array(list(itertools.chain.from_iterable(self.current_flat_ctx.values())))
+        try:
+            self.cur_context = np.array(list(itertools.chain.from_iterable(self.current_flat_ctx.values())))
+        except Exception:
+            self.cur_context = np.array(list(self.current_flat_ctx.values()))
 
         if hasattr(env, 'context_space'):
             ctx_space = flatten(env.context_space)
@@ -217,9 +233,15 @@ class CtxDictWrapper(gym.ObservationWrapper, TaskSettableEnv):
                                                        self.context_space))
 
         # self.reconfig(context)
+    # def set_task(self, task: TaskType) -> None:
+    #     self.cur_context = task
+    #     self.current_flat_ctx.update([(k, task[v[0]:v[1]]) for k, v in self.ctx_map.items()])
+    #     self.env.set_task(unflatten(self.current_flat_ctx))
+    #     return
+    
     def set_task(self, task: TaskType) -> None:
         self.cur_context = task
-        self.current_flat_ctx.update([(k, task[v[0]:v[1]]) for k, v in self.ctx_map.items()])
+        self.current_flat_ctx.update([(k, task[v[0]]) for k, v in self.ctx_map.items()])
         self.env.set_task(unflatten(self.current_flat_ctx))
         return
 
@@ -246,16 +268,16 @@ class CtxDictWrapper(gym.ObservationWrapper, TaskSettableEnv):
 class DiscreteCtxDictWrapper(gym.Wrapper):
 
 
-    def __init__(self, env, embedding_map,embeddings, key=None,
-                 embedding_dim = 5 ,):
+    def __init__(self, env ,ctx_encoder, ctx_decoder, key=None,):
         super().__init__(env)
         # self.current_ctx =
         self.flat_ctx = flatten(self.env.get_task())
         ctxkeys = list(self.flat_ctx.keys())
         if key is None:
-            key = ctxkeys[0][0]
+            self.selected_keys  =ctxkeys
+        else:
+            self.selected_keys = list(set(ctxkeys) & set(key))
 
-        self.selected_keys = [k for k in ctxkeys if k[0] in key]
 
         assert len(self.selected_keys) > 0
         self.ctx_map = dict()
@@ -267,16 +289,15 @@ class DiscreteCtxDictWrapper(gym.Wrapper):
             bias += ctx_length
 
 
-        self.embedding_dim = embedding_dim
-
-        self.embedding_map = embedding_map
-        self.embeddings = embeddings
+        # self.embedding_dim = ctx_embeddings.size[1]
+        self.ctx_encoder = ctx_encoder
+        self.ctx_decoder = ctx_decoder
 
 
         self.current_flat_ctx = {k:self.flat_ctx[k] for k in self.selected_keys}
-        self.cur_context_arr = np.array(list(itertools.chain.from_iterable(self.current_flat_ctx.values())))
-        self.cur_context = self.embeddings[find_category_idx(self.embedding_map, self.cur_context_arr), :]
-
+        # self.cur_context_arr = np.array(list(itertools.chain.from_iterable(self.current_flat_ctx.values())))
+        self.cur_context_encoded =  self.ctx_encoder(self.current_flat_ctx )
+        self.embedding_dim = self.cur_context_encoded.size
         # if hasattr(env, 'context_space'):
         #     ctx_space = flatten(env.context_space)
         #     ctx_lb=np.zeros(0)
@@ -286,8 +307,8 @@ class DiscreteCtxDictWrapper(gym.Wrapper):
         #
         #         ctx_ub = np.concatenate((ctx_ub, ctx_space[k].high))
         # else:
-        ctx_lb = np.ones(embedding_dim) * -1
-        ctx_ub = np.ones(embedding_dim) * 1
+        ctx_lb = np.ones(self.embedding_dim) * -1
+        ctx_ub = np.ones(self.embedding_dim) * 1
 
         self.context_space = gym.spaces.Box(low=ctx_lb, high=ctx_ub, dtype=np.float64)
         # self.observation = self.identity_obs
@@ -303,11 +324,12 @@ class DiscreteCtxDictWrapper(gym.Wrapper):
 
         # self.reconfig(context)
     def set_task(self, task: TaskType) -> None:
+        self.cur_context_encoded = task
 
-        ctx_idx = np.argmin(np.sum((self.embeddings-task)**2, axis=1))
-        self.cur_context = self.embeddings[ctx_idx, :]
-        self.cur_context_arr = self.embedding_map[ctx_idx]
-        self.current_flat_ctx.update([(k, self.cur_context_arr[v[0]: v[1]]) for k, v in self.ctx_map.items()])
+        ctx = self.ctx_decoder(task)
+        self.current_flat_ctx.update(ctx)
+
+        # self.cur_context_arr = np.array(list(itertools.chain.from_iterable(self.current_flat_ctx.values())))
         self.env.set_task(unflatten(self.current_flat_ctx))
         return
 
@@ -318,14 +340,14 @@ class DiscreteCtxDictWrapper(gym.Wrapper):
         return {'mean': ctx_array, 'var': np.zeros(len(ctx_array))}
 
     def get_task(self):
-        return self.cur_context
+        return self.cur_context_encoded
 
     def reconfig(self, config):
         self.env.reconfig(config)
         ctx = flatten(self.env.get_task())
         self.current_flat_ctx.update([(k, ctx[k]) for k in self.selected_keys if k in ctx])
-        self.cur_context_arr = np.array(list(itertools.chain.from_iterable(self.current_flat_ctx.values())))
-        self.cur_context = self.embeddings[find_category_idx(self.embedding_map, self.cur_context_arr), :]
+        # self.cur_context_arr = np.array(list(itertools.chain.from_iterable(self.current_flat_ctx.values())))
+        self.cur_context_encoded = self.ctx_encoder(self.current_flat_ctx)
         # self.env.reconfig(config)
 
 

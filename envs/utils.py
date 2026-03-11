@@ -206,9 +206,7 @@ class gymEnvWrapper(gymnasium.Wrapper):
         else:
             self._observation_space = None
 
-
     def step(self, action):
-
         observation, reward, terminated, info = self.env.step(action)
 
         return observation, reward, terminated , False, info

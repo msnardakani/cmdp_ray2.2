@@ -1,7 +1,6 @@
 from ray.rllib import MultiAgentEnv
 
 from ray.rllib.env.apis.task_settable_env import TaskSettableEnv, TaskType
-from ray.rllib.env.env_context import EnvContext
 
 import gym
 import logging

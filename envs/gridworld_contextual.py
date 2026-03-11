@@ -19,14 +19,14 @@ def box2discrete( val, grid_map_shape):
 
 def coordinate_transform(point, grid_map_shape):
     return 2. * (grid_map_shape[1] * point[0] + point[1]) / (
-        grid_map_shape[0] * grid_map_shape[1]) - 1.
+        grid_map_shape[0] * grid_map_shape[1]-1) - 1.
 
 
 class TaskSettableGridworld(GridworldEnv, TaskSettableEnv):
     def __init__(self, config: EnvContext):
         super().__init__()
-        self.size = config.get("size", (10, 16))
-        self.corridor = config.get("corridor", (2, 8))
+        self.size = config.get("size", (11, 11))
+        self.corridor = config.get("corridor", (1, 3))
         self.region = correct_region(config.get('region',{0: (1, 1), 1: (-2, -2)}), self.size)
         self.context_space = spaces.Dict({'corridor': spaces.Box(low=np.array([-1.0, ]), \
                                             high=np.array([1.0, ]),dtype=np.float64),
@@ -79,18 +79,20 @@ class TaskSettableGridworld(GridworldEnv, TaskSettableEnv):
     def set_task(self, task):
             # Return the gridmap imported from a txt plan
         if 'region' in task:
-            assert task['region'][0] != task['region'][1], "Target region must be different from Start region"
+            region = self.region.copy()
+            region.update(task['region'])
+            assert region[0][0] != region[1][0] or region[0][1] != region[1][1] , "Target region must be different from Start region"
+
 
             self.start_grid_map[self.region[0]] = 0
             self.start_grid_map[self.region[1]] = 0
-            self.region = {0: box2discrete(task['region'][0], self.grid_map_shape),
-                           1: box2discrete(task['region'][1], self.grid_map_shape)}
+            self.region = region
 
 
             # grid_map = open(grid_map_path, 'r').readlines()
         if 'corridor' in task:
             size = self.grid_map_shape
-            self.corridor = box2discrete(task['corridor'], size)
+            self.corridor = task['corridor']
 
 
             grid_map = np.ones(shape=size, dtype=int)
@@ -133,11 +135,10 @@ class TaskSettableGridworld(GridworldEnv, TaskSettableEnv):
 
 
     def get_task(self):
-        return {'corridor': coordinate_transform(self.corridor, self.grid_map_shape),
-                'region': np.asarray([coordinate_transform(self.region[0], self.grid_map_shape),
-                                      coordinate_transform(self.region[1], self.grid_map_shape)]) }
+        return {'corridor': self.corridor,
+                'region': self.region}
 
 
 
     def report_task(self):
-        return {'corridor': self.corridor, 'region':self.region}
+        return {'corridor': self.corridor, 'region': self.region}

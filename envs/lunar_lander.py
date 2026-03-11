@@ -214,9 +214,11 @@ class LunarLander(gym.Env, EzPickle):
         "render_fps": FPS,
     }
 
+    MAIN_ENGINE_POWER = 13.0
+    SIDE_ENGINE_POWER = 0.6
     def __init__(
         self,
-        render_mode: Optional[str] = None,
+        render_mode: Optional[str] = "rgb_array",
         continuous: bool = False,
         gravity: float = -10.0,
         enable_wind: bool = False,
@@ -269,8 +271,8 @@ class LunarLander(gym.Env, EzPickle):
                 # these are bounds for position
                 # realistically the environment should have ended
                 # long before we reach more than 50% outside
-                -2.5,  # x coordinate
-                -2.5,  # y coordinate
+                -10.,
+                -10.,
                 # velocity bounds is 5x rated speed
                 -10.0,
                 -10.0,
@@ -285,8 +287,8 @@ class LunarLander(gym.Env, EzPickle):
                 # these are bounds for position
                 # realistically the environment should have ended
                 # long before we reach more than 50% outside
-                2.5,  # x coordinate
-                2.5,  # y coordinate
+                10,  # x coordinate
+                10,  # y coordinate
                 # velocity bounds is 5x rated speed
                 10.0,
                 10.0,
@@ -309,7 +311,7 @@ class LunarLander(gym.Env, EzPickle):
             # Nop, fire left engine, main engine, right engine
             self.action_space = spaces.Discrete(4)
 
-        self.render_mode = render_mode
+        self.render_mode = "rgb_array"
 
     def _destroy(self):
         if not self.moon:
@@ -562,14 +564,14 @@ class LunarLander(gym.Env, EzPickle):
                 )
                 p.ApplyLinearImpulse(
                     (
-                        ox * MAIN_ENGINE_POWER * m_power,
-                        oy * MAIN_ENGINE_POWER * m_power,
+                        ox * self.MAIN_ENGINE_POWER * m_power,
+                        oy * self.MAIN_ENGINE_POWER * m_power,
                     ),
                     impulse_pos,
                     True,
                 )
             self.lander.ApplyLinearImpulse(
-                (-ox * MAIN_ENGINE_POWER * m_power, -oy * MAIN_ENGINE_POWER * m_power),
+                (-ox * self.MAIN_ENGINE_POWER * m_power, -oy * self.MAIN_ENGINE_POWER * m_power),
                 impulse_pos,
                 True,
             )
@@ -609,14 +611,14 @@ class LunarLander(gym.Env, EzPickle):
                 p = self._create_particle(0.7, impulse_pos[0], impulse_pos[1], s_power)
                 p.ApplyLinearImpulse(
                     (
-                        ox * SIDE_ENGINE_POWER * s_power,
-                        oy * SIDE_ENGINE_POWER * s_power,
+                        ox * self.SIDE_ENGINE_POWER * s_power,
+                        oy * self.SIDE_ENGINE_POWER * s_power,
                     ),
                     impulse_pos,
                     True,
                 )
             self.lander.ApplyLinearImpulse(
-                (-ox * SIDE_ENGINE_POWER * s_power, -oy * SIDE_ENGINE_POWER * s_power),
+                (-ox * self.SIDE_ENGINE_POWER * s_power, -oy * self.SIDE_ENGINE_POWER * s_power),
                 impulse_pos,
                 True,
             )
@@ -657,17 +659,24 @@ class LunarLander(gym.Env, EzPickle):
         reward -= s_power * 0.03
 
         terminated = False
-        if self.game_over or abs(state[0]) >= 1.0:
+        landed=False
+        if self.game_over or abs(state[0]) >= 1.0 or abs(state[1]) > 10. or abs(state[4] )> 2*math.pi or abs(state[5] )> 10:
+            state[4]= np.clip(state[4], -2*math.pi, 2*math.pi)
+            state[0]= np.clip(state[0], -1.0, 1.0)
+            state[1]= np.clip(state[1], -10.0, 10.0)
+            state[5]= np.clip(state[5], -10.0, 10.0)
+
             terminated = True
             reward = -100
         if not self.lander.awake:
+            landed=True
             terminated = True
             reward = +100
 
         if self.render_mode == "human":
             self.render()
         # truncation=False as the time limit is handled by the `TimeLimit` wrapper added during `make`
-        return np.array(state, dtype=np.float32), reward, terminated, False, {}
+        return np.array(state, dtype=np.float32), reward, terminated, False, {'success':landed}
 
     def render(self):
         if self.render_mode is None:
@@ -890,7 +899,41 @@ class LunarLanderCtx(LunarLander, TaskSettableEnv, EzPickle):
                          turbulence_power=context[2], )
         ctx_lb = np.array([-12., 0.0, 0.0, ])
         ctx_ub = np.array([0., 20.0, 2.0, ])
+        self.context_space = spaces.Box(low=ctx_lb, high=ctx_ub, dtype=np.float32)      
+
+    def set_task(self, task: TaskType) -> None:
+        assert self.context_space.contains(task.astype(np.float32))
+        self.gravity = float(task[0])
+        
+        self.wind_power = task[1]
+        self.turbulence_power = task[2]
+        return
+
+    def get_task(self) -> TaskType:
+        return np.array([self.gravity, self.wind_power, self.turbulence_power], dtype=np.float32)
+
+
+
+class LunarLanderCtx5D(LunarLander, TaskSettableEnv, EzPickle):
+    metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": FPS}
+
+    def __init__(
+            self,
+            render_mode: Optional[str] = None,
+            continuous: bool = False,
+            context=  np.array([-10, 15, 1.5, 30, 0.6],dtype=np.float32),
+    ):
+        super().__init__(render_mode=render_mode,
+                         continuous=continuous,
+                         gravity=context[0],
+                         enable_wind=True,
+                         wind_power=context[1],
+                         turbulence_power=context[2], )
+        ctx_lb = np.array([-12., 0.0, 0.0, 10., .1])
+        ctx_ub = np.array([0., 20.0, 2.0, 50.,10.])
         self.context_space = spaces.Box(low=ctx_lb, high=ctx_ub, dtype=np.float32)
+        self.SIDE_ENGINE_POWER=context[4]
+        self.MAIN_ENGINE_POWER=context[3]
 
     def set_task(self, task: TaskType) -> None:
         assert self.context_space.contains(task.astype(np.float32))
@@ -898,7 +941,9 @@ class LunarLanderCtx(LunarLander, TaskSettableEnv, EzPickle):
 
         self.wind_power = task[1]
         self.turbulence_power = task[2]
+        self.MAIN_ENGINE_POWER=task[3]
+        self.SIDE_ENGINE_POWER=task[4]
         return
 
     def get_task(self) -> TaskType:
-        return np.array([self.gravity, self.wind_power, self.turbulence_power], dtype=np.float32)
+        return np.array([self.gravity, self.wind_power, self.turbulence_power, self.MAIN_ENGINE_POWER, self.SIDE_ENGINE_POWER], dtype=np.float32)
