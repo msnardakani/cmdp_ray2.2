@@ -23,16 +23,6 @@ ModelCatalog.register_custom_model(
     DistralTorchModel,
 )
 
-# checkpoint_dir = '../results/GridWorld/V10.1.5/Set0/ctx_hid/baseline/default/PPO_2x64/'
-# learner_0 = Policy.from_checkpoint(
-#     '../results/GridWorld/V10.1.5/Set0/ctx_hid/baseline/default/PPO_2x64/PPO_MADnCEnv_b16be_00000_0_grad_clip=100,seed=0_2024-01-19_11-06-24/checkpoint_000000/policies/distilled_policy')
-
-# env_creator = lambda config, ctx_mode: CtxDictWrapper(TimeLimitRewardWrapper(
-#                 TaskSettableGridworld(config),max_episode_steps=max_steps, key = 'distance'),
-#                 key='region', ctx_visible=ctx_mode
-#                 )
-
-# learner_0 = Policy.from_checkpoint('./results/GridWorld/V10.1.5/Set0/ctx_hid/baseline/default/PPO_2x64/PPO_MADnCEnv_b16be_00000_0_grad_clip=100,seed=0_2024-01-19_11-06-24/checkpoint_000000/policies/learner_0')
 sets = dict(
     # Set0=[0, 0],
     # Set1=[0, ],  # left and right tasks from more complicated ones
